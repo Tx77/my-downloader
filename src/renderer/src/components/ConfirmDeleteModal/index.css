@@ -1,0 +1,155 @@
+/* src/components/DeleteModal.css */
+/* 复用部分 ConfirmModal 的遮罩样式，确保统一 */
+.delete-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(5px);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 2000;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.delete-modal-content {
+  background-color: var(--bg-panel);
+  padding: 24px;
+  border-radius: 12px;
+  width: 400px;
+  max-width: 90%;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  animation: scaleUp 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.delete-header {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.delete-body {
+  font-size: 14px;
+  color: var(--text-sub);
+  line-height: 1.5;
+}
+
+/* --- 自定义复选框样式 --- */
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+  background-color: var(--bg-dark);
+  padding: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  transition: all 0.2s;
+}
+
+.checkbox-label:hover {
+  border-color: #555;
+  background-color: var(--bg-hover);
+}
+
+/* 隐藏原生 checkbox */
+.checkbox-label input[type='checkbox'] {
+  display: none;
+}
+
+/* 自定义方框 */
+.custom-checkbox {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--text-sub);
+  border-radius: 4px;
+  margin-right: 12px;
+  position: relative;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 选中状态 */
+.checkbox-label input:checked + .custom-checkbox {
+  background-color: var(--primary);
+  border-color: var(--primary);
+}
+
+/* 勾选图标 (用 CSS 画个钩) */
+.checkbox-label input:checked + .custom-checkbox::after {
+  content: '';
+  width: 5px;
+  height: 9px;
+  border: solid black;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) translateY(-1px);
+}
+
+.checkbox-text {
+  color: var(--text-main);
+  font-size: 13px;
+}
+
+/* 底部按钮 */
+.delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.delete-btn {
+  padding: 8px 20px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.2s;
+}
+
+.delete-btn.cancel {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-main);
+}
+.delete-btn.cancel:hover {
+  background-color: var(--bg-hover);
+}
+
+/* 确认删除按钮 - 使用红色警示，或者保持主题绿，这里我们用红色更符合语义，但保持深色风格 */
+.delete-btn.confirm {
+  background-color: var(--error); /* 红色警示 */
+  color: white;
+}
+.delete-btn.confirm:hover {
+  opacity: 0.9;
+  box-shadow: 0 4px 12px rgba(233, 20, 41, 0.3);
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes scaleUp {
+  from {
+    transform: scale(0.95);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}

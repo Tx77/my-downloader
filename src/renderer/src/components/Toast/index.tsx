@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { AlertCircle, CheckCircle2 } from 'lucide-react'
+import './index.css'
 
 export const Toast = ({ show, message, type, onClose }: any) => {
   useEffect(() => {

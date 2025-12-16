@@ -1,36 +1,139 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { join } from 'path'
 import { spawn, type ChildProcess } from 'child_process'
+import * as fs from 'fs/promises'
 import { getBinaryPath, getProxyArgs } from './utils'
 import { createCookieFile, cleanupCookieFile } from './cookie'
+import iconv from 'iconv-lite'
 
-// 用于存储当前正在进行的下载进程，以便取消
-let currentDownloadProcess: ChildProcess | null = null
+function decodeYtDlpOutput(buf: Buffer) {
+  // Windows 下 yt-dlp 输出常见是 CP936(GBK)
+  if (process.platform === 'win32') {
+    return iconv.decode(buf, 'cp936')
+  }
+  return buf.toString('utf8')
+}
+
+// 🔥 使用 Map 存储多个进程，Key 是任务 ID
+const activeDownloads = new Map<string, ChildProcess>()
+
+// 🔥 标记被取消的任务
+const canceledIds = new Set<string>()
+
+// 🔥 记录每个任务产生/触达过的真实文件路径（用于取消清理 .part / 删除本地文件）
+const taskFiles = new Map<string, Set<string>>()
+
+function normalizePath(p: string) {
+  return p.replace(/^"+|"+$/g, '').trim()
+}
+
+function addTaskFile(id: string, p: string) {
+  const real = normalizePath(p)
+  if (!real) return
+
+  const set = taskFiles.get(id) ?? new Set<string>()
+  set.add(real)
+  taskFiles.set(id, set)
+}
+
+async function safeUnlink(p: string) {
+  try {
+    await fs.unlink(p)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// 取消时只清理临时文件（.part/.ytdl 等）
+async function cleanupTaskTempFiles(id: string) {
+  const set = taskFiles.get(id)
+  if (!set) return 0
+  let removed = 0
+
+  for (const p of set) {
+    const lower = p.toLowerCase()
+    if (
+      lower.endsWith('.part') ||
+      lower.endsWith('.ytdl') ||
+      lower.endsWith('.temp') ||
+      lower.endsWith('.tmp')
+    ) {
+      if (await safeUnlink(p)) removed++
+    }
+  }
+
+  // 取消任务后，路径记录没必要留着
+  taskFiles.delete(id)
+  return removed
+}
+
+// 🔥 杀进程树（Windows: taskkill；mac/linux: kill process group）
+function killTree(child: ChildProcess) {
+  if (!child?.pid) return
+
+  if (process.platform === 'win32') {
+    spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true })
+  } else {
+    try {
+      // 需要 detached 才能保证进程组可用
+      process.kill(-child.pid, 'SIGTERM')
+    } catch {
+      try {
+        child.kill('SIGTERM')
+      } catch {}
+    }
+  }
+}
 
 export function setupDownloadHandlers(mainWindow: BrowserWindow) {
-  // 1. 取消下载接口
-  ipcMain.handle('cancel-download', () => {
-    if (currentDownloadProcess) {
-      console.log('[Download] 收到取消指令，正在终止进程...')
-      // Windows 下有时候 kill 不彻底，可以考虑 tree-kill 库，但通常 .kill() 够用了
-      currentDownloadProcess.kill()
-      currentDownloadProcess = null
+  const capturePaths = (id: string, output: string) => {
+    const normalize = (p: string) =>
+      p
+        .replace(/\r/g, '')
+        .replace(/^"+|"+$/g, '')
+        .trim()
+
+    const destMatch = output.match(/\[download\]\s+Destination:\s+(.+)\s*$/m)
+    if (destMatch?.[1]) {
+      const p = normalize(destMatch[1])
+      mainWindow.webContents.send('download-file', { id, path: p })
+    }
+
+    const mergeMatch = output.match(/\[ffmpeg\]\s+Merging formats into\s+"(.+?)"/)
+    if (mergeMatch?.[1]) {
+      const p = normalize(mergeMatch[1])
+      mainWindow.webContents.send('download-file', { id, path: p })
+    }
+
+    const partMatch = output.match(/([A-Za-z]:\\[^\r\n"]+?\.part)\b/)
+    if (partMatch?.[1]) {
+      const p = normalize(partMatch[1])
+      mainWindow.webContents.send('download-file', { id, path: p })
+    }
+  }
+
+  // 1. 取消下载 (需要传入 id)
+  ipcMain.handle('cancel-download', (_event, id: string) => {
+    canceledIds.add(id)
+
+    const child = activeDownloads.get(id)
+    if (child) {
+      console.log(`[Download] Canceling task: ${id}, pid=${child.pid}`)
+      killTree(child)
       return true
     }
     return false
   })
 
-  // 2. 开始下载接口
-  ipcMain.on('start-download', (_event, { url, formatId, savePath, isAudioOnly, sessData }) => {
+  // 2. 开始下载 (接收 id)
+  ipcMain.on('start-download', (event, { id, url, formatId, savePath, isAudioOnly, sessData }) => {
     const ytDlpPath = getBinaryPath('yt-dlp')
     const ffmpegPath = getBinaryPath('ffmpeg')
 
-    console.log(`[Download] Starting download: ${url}`)
-
-    // 1. 生成 Cookie 文件
+    console.log(`[Download] Start Task [${id}]: ${url}`)
     const cookieFilePath = createCookieFile(sessData)
 
-    // 2. 组装参数
     const args = [
       url,
       '--ffmpeg-location',
@@ -38,75 +141,117 @@ export function setupDownloadHandlers(mainWindow: BrowserWindow) {
       '-o',
       join(savePath, '%(title)s.%(ext)s'),
       '--no-playlist',
-      '--rm-cache-dir', // 强制清除缓存，防止读取旧数据
-      // 伪装 User-Agent
+      '--rm-cache-dir',
+      '--newline',
+      '--print',
+      'after_move:filepath',
       '--user-agent',
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       ...getProxyArgs(url)
     ]
 
-    // 注入 Cookie 文件
-    if (cookieFilePath) {
-      args.push('--cookies', cookieFilePath)
-    }
+    if (cookieFilePath) args.push('--cookies', cookieFilePath)
 
-    // 格式选择逻辑
     if (isAudioOnly && formatId && formatId !== 'best') {
-      // 纯音频模式且选了特定格式 (如 m4a)
       args.push('-f', formatId)
     } else if (isAudioOnly) {
-      // 纯音频模式，默认转 MP3
+      // audio 模式：best -> 提取 mp3
       args.push('-x', '--audio-format', 'mp3')
     } else if (formatId) {
-      // 视频模式，指定画质 + 最佳音频
+      // video 模式：指定 formatId + bestaudio 合并
       args.push('-f', `${formatId}+bestaudio/best`, '--merge-output-format', 'mp4')
     } else {
-      // 视频模式，自动最佳
       args.push('-f', 'bestvideo+bestaudio/best', '--merge-output-format', 'mp4')
     }
 
-    console.log('[Download] Executing args:', args)
-
-    // 3. 启动进程
-    // ⚠️ PYTHONIOENCODING=utf-8 是解决中文乱码的关键
-    currentDownloadProcess = spawn(ytDlpPath, args, {
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
+    const downloadProcess = spawn(ytDlpPath, args, {
+      detached: process.platform !== 'win32'
     })
 
-    // 4. 监听标准输出 (进度条)
-    currentDownloadProcess.stdout?.on('data', (data) => {
-      const output = data.toString()
+    activeDownloads.set(id, downloadProcess)
 
-      // 正则解析：匹配百分比和总大小 (支持 MiB, GiB 等)
-      // 输出示例: [download]  23.5% of 10.00MiB at 2.00MiB/s
-      const match = output.match(/(\d+\.\d+)%\s+of\s+(?:~)?([\d\.]+[KMGTP]i?B)/)
+    downloadProcess.stdout?.on('data', (data) => {
+      const output = decodeYtDlpOutput(data as Buffer)
 
-      if (match) {
-        const percent = parseFloat(match[1])
-        const totalSize = match[2]
-        mainWindow.webContents.send('download-progress', { log: output, percent, totalSize })
-      } else {
-        // 部分直播流或特殊情况可能没有总大小
-        mainWindow.webContents.send('download-progress', { log: output, percent: 0, totalSize: '' })
+      for (const line of output.split(/\r?\n/)) {
+        const p = line.trim()
+        if (!p) continue
+        if (/^[A-Za-z]:\\/.test(p) || p.startsWith('/')) {
+          mainWindow.webContents.send('download-file', { id, path: p })
+        }
+      }
+      capturePaths(id, output)
+
+      // ====== 解析真实文件路径（用于取消清理 / 删除本地文件）======
+      // 1) [download] Destination: C:\...\xxx.webm
+      const destMatch = output.match(/\[download\]\s+Destination:\s+(.+)\s*$/m)
+      if (destMatch?.[1]) {
+        const p = normalizePath(destMatch[1])
+        addTaskFile(id, p)
+        mainWindow.webContents.send('download-file', { id, path: p })
+      }
+
+      // 2) [ffmpeg] Merging formats into "C:\...\xxx.mp4"
+      const mergeMatch = output.match(/\[ffmpeg\]\s+Merging formats into\s+"(.+?)"/)
+      if (mergeMatch?.[1]) {
+        const p = normalizePath(mergeMatch[1])
+        addTaskFile(id, p)
+        mainWindow.webContents.send('download-file', { id, path: p })
+      }
+
+      // 3) 直接抓一把 .part 路径（有时不走 Destination）
+      const partMatch = output.match(/([A-Za-z]:\\[^\r\n"]+?\.part)\b/)
+      if (partMatch?.[1]) {
+        const p = normalizePath(partMatch[1])
+        addTaskFile(id, p)
+        mainWindow.webContents.send('download-file', { id, path: p })
+      }
+
+      // ====== 你的进度解析逻辑（保持原样）======
+      try {
+        const match = output.match(/(\d+(?:\.\d+)?)%\s+of\s+(?:~)?\s*([\d\.]+\s*[KMGTP]i?B)/)
+        if (match) {
+          const percent = parseFloat(match[1])
+          const totalSize = match[2].replace(/[~\s]/g, '')
+          mainWindow.webContents.send('download-progress', { id, log: output, percent, totalSize })
+        } else {
+          const percentOnly = output.match(/(\d+(?:\.\d+)?)%/)
+          if (percentOnly) {
+            mainWindow.webContents.send('download-progress', {
+              id,
+              log: output,
+              percent: parseFloat(percentOnly[1]),
+              totalSize: '计算中...'
+            })
+          }
+        }
+      } catch {}
+    })
+
+    downloadProcess.stderr?.on('data', (d) => {
+      const log = decodeYtDlpOutput(d as Buffer)
+      capturePaths(id, log)
+      if (log.toLowerCase().includes('error')) {
+        console.error(`[Task ${id} Error]:`, log)
+        mainWindow.webContents.send('download-error', { id, error: log })
       }
     })
 
-    // 5. 监听错误输出
-    currentDownloadProcess.stderr?.on('data', (d) => {
-      // yt-dlp 的警告也会走 stderr，这里发给前端显示在日志里即可
-      mainWindow.webContents.send('download-error', d.toString())
-    })
+    downloadProcess.on('close', async (code) => {
+      console.log(`[Task ${id}] Finished code: ${code}`)
 
-    // 6. 监听进程结束
-    currentDownloadProcess.on('close', (code) => {
-      console.log(`[Download] Process finished with code: ${code}`)
-      currentDownloadProcess = null
-
-      // 清理临时 Cookie 文件
+      activeDownloads.delete(id)
       cleanupCookieFile(cookieFilePath)
 
-      // 通知前端
-      mainWindow.webContents.send('download-complete', code)
+      // ✅ 如果是取消：发 canceled + 清理 .part 临时文件（并告诉前端清理了几个）
+      if (canceledIds.has(id)) {
+        canceledIds.delete(id)
+        const removed = await cleanupTaskTempFiles(id)
+        mainWindow.webContents.send('download-canceled', { id, removed })
+        return
+      }
+
+      mainWindow.webContents.send('download-complete', { id, code })
     })
   })
 }

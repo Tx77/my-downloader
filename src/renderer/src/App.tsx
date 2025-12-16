@@ -1,369 +1,578 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, JSX } from 'react'
 import {
   Download,
   FolderOpen,
   Music2,
   Link2,
   Terminal,
-  ChevronDown,
-  ChevronRight,
-  XCircle // 新增取消图标
+  Settings,
+  CheckCircle2,
+  AlertCircle,
+  Clock,
+  X,
+  Trash2,
+  Film
 } from 'lucide-react'
-import './assets/main.css'
-
-// 引入拆分的组件
+import './assets/base.css'
+import './assets/App.css'
 import { Toast } from './components/Toast'
 import { CustomSelect } from './components/CustomSelect'
 import { ConfirmModal } from './components/ConfirmModal'
+import { ConfirmDeleteModal } from './components/ConfirmDeleteModal'
 import { CookieManager } from './components/CookieManager'
-import { JSX } from 'react/jsx-runtime'
 
-// --- 辅助工具函数：处理文件大小 ---
+interface DownloadTask {
+  id: string
+  url: string
+  title: string
+  status: 'queued' | 'downloading' | 'completed' | 'error' | 'canceled'
+  percent: number
+  totalSize: string
+  formatId: string | null
+  isAudioOnly: boolean
+  savePath: string
+  ext: string
+  log: string
 
-// 1. 将 "10.5 MiB" 这种字符串解析为 字节数值 (number)
-const parseSizeToBytes = (sizeStr: string): number => {
-  if (!sizeStr) return 0
-  // 定义单位倍数
-  const units: { [key: string]: number } = {
-    B: 1,
-    KB: 1024,
-    MB: 1024 ** 2,
-    GB: 1024 ** 3,
-    TB: 1024 ** 4,
-    KiB: 1024,
-    MiB: 1024 ** 2,
-    GiB: 1024 ** 3,
-    TiB: 1024 ** 4
-  }
-
-  // 正则匹配数字和单位 (例如: 100.5 MiB)
-  const match = sizeStr.match(/([\d\.]+)\s*([A-Za-z]+)/)
-  if (match) {
-    const val = parseFloat(match[1])
-    const unit = match[2]
-    const multiplier = units[unit] || 1
-    return val * multiplier
-  }
-  return 0
-}
-
-// 2. 将字节数值格式化为易读字符串 (用于计算当前已下载大小)
-const formatBytes = (bytes: number): string => {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  // 保留1位小数
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
+  // ✅ 新增：记录真实落盘路径（含 .part / 合并后的 mp4 / 中间文件）
+  files: string[]
 }
 
 function App(): JSX.Element {
-  // --- 状态定义 ---
-  const [url, setUrl] = useState('')
   const [savePath, setSavePath] = useState('')
+  const [sessData, setSessData] = useState('')
+  const [maxConcurrent, setMaxConcurrent] = useState(5)
+
+  const [url, setUrl] = useState('')
   const [mode, setMode] = useState<'video' | 'audio'>('video')
-  const [logs, setLogs] = useState<string[]>([])
-
-  // 进度条状态：包含百分比、总大小字符串、当前大小字符串
-  const [progressData, setProgressData] = useState({ percent: 0, totalSize: '', currentSize: '' })
-
-  const [isDownloading, setIsDownloading] = useState(false)
-  const [showLogs, setShowLogs] = useState(false)
-
-  const [isModalOpen, setIsModalOpen] = useState(false)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [videoData, setVideoData] = useState<any>(null)
-
-  const [sessData, setSessData] = useState('')
+  const [isModalOpen, setIsModalOpen] = useState(false)
   const [toast, setToast] = useState({ show: false, message: '', type: 'success' })
+  const [tab, setTab] = useState<'all' | 'active' | 'completed'>('all')
 
+  const [tasks, setTasks] = useState<DownloadTask[]>([])
+
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
+  const [taskToDelete, setTaskToDelete] = useState<DownloadTask | null>(null)
+
+  const [globalLogs, setGlobalLogs] = useState<string[]>([])
   const logEndRef = useRef<HTMLDivElement>(null)
 
-  // --- 初始化与配置加载 ---
   useEffect(() => {
-    const loadConfig = async () => {
-      // @ts-ignore
+    const init = async () => {
       const path = await window.electron.getSavedPath()
       if (path) setSavePath(path)
 
-      // @ts-ignore
       const cookie = await window.electron.getCookie()
       if (cookie) setSessData(cookie)
     }
-    loadConfig()
+    init()
+
+    // ✅ 记录真实路径
+    window.electron.onFile(({ id, path }) => {
+      setTasks((prev) =>
+        prev.map((t) => {
+          if (t.id !== id) return t
+          if (t.files.includes(path)) return t
+          return { ...t, files: [...t.files, path] }
+        })
+      )
+    })
+
+    // 进度：已取消的不再覆盖状态
+    window.electron.onProgress(({ id, log, percent, totalSize }) => {
+      setTasks((prev) =>
+        prev.map((t) => {
+          if (t.id !== id) return t
+          if (t.status === 'canceled') return t
+          return {
+            ...t,
+            percent,
+            totalSize: totalSize || t.totalSize,
+            log,
+            status: 'downloading'
+          }
+        })
+      )
+
+      if (log && log.trim()) {
+        setGlobalLogs((prev) => [...prev, log].slice(-50))
+      }
+      logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    })
+
+    // 完成：已取消的不再覆盖
+    window.electron.onComplete(({ id, code }) => {
+      setTasks((prev) =>
+        prev.map((t) => {
+          if (t.id === id) {
+            const ok = code === 0
+            return {
+              ...t,
+              status: ok ? 'completed' : 'error',
+              percent: ok ? 100 : t.percent,
+              totalSize: ok ? (t.totalSize === '等待中...' ? '已完成' : t.totalSize) : t.totalSize, // ✅ 新增
+              log: ok ? '下载成功' : '下载失败'
+            }
+          }
+          return t
+        })
+      )
+    })
+
+    // 错误
+    window.electron.onError(({ id, error }) => {
+      setTasks((prev) =>
+        prev.map((t) => {
+          if (t.id !== id) return t
+          if (t.status === 'canceled') return t
+          return { ...t, status: 'error', log: `❌ 错误: ${error}` }
+        })
+      )
+      showToastMsg('任务下载失败，请检查日志', 'error')
+    })
+
+    // ✅ 取消确认（并提示清理了多少 .part）
+    window.electron.onCanceled(({ id, removed }) => {
+      setTasks((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, status: 'canceled', log: '任务已取消' } : t))
+      )
+      if (removed > 0) {
+        setGlobalLogs((prev) => [...prev, `🧹 已清理临时文件: ${removed} 个`].slice(-50))
+      }
+    })
+
+    return () => {
+      window.electron.removeListeners && window.electron.removeListeners()
+    }
   }, [])
 
-  // --- 交互处理函数 ---
+  // --- 调度器 ---
+  useEffect(() => {
+    const activeCount = tasks.filter((t) => t.status === 'downloading').length
+    const nextTask = tasks.find((t) => t.status === 'queued')
+
+    if (activeCount < maxConcurrent && nextTask) {
+      startTask(nextTask)
+    }
+  }, [tasks, maxConcurrent])
+
+  const startTask = (task: DownloadTask) => {
+    setTasks((prev) =>
+      prev.map((t) => (t.id === task.id ? { ...t, status: 'downloading', log: '正在连接...' } : t))
+    )
+
+    window.electron.startDownload(
+      task.url,
+      task.formatId,
+      task.savePath,
+      task.isAudioOnly,
+      sessData,
+      task.id
+    )
+  }
 
   const showToastMsg = (msg: string, type: 'success' | 'error' = 'success') => {
-    setToast({ show: true, message: msg, type })
+    setToast({ show: true, message: msg, type: type as any })
   }
 
-  const handleSelectFolder = async () => {
-    // @ts-ignore
-    const path = await window.electron.selectFolder()
-    if (path) setSavePath(path)
-  }
-
-  const handleLogin = async () => {
-    // @ts-ignore
-    const cookie = await window.electron.openLoginWindow()
-    if (cookie) {
-      setSessData(cookie)
-      showToastMsg('🎉 B站登录成功！Cookie 已更新')
-    }
-  }
-
-  // 点击“分析”按钮
   const handleAnalyze = async () => {
-    if (!url) return showToastMsg('请先填写视频链接', 'error')
-    if (!savePath) return showToastMsg('请先选择保存目录', 'error')
+    if (!url) return showToastMsg('请填写链接', 'error')
+    if (!savePath) return showToastMsg('请选择目录', 'error')
 
-    setIsModalOpen(true)
     setIsAnalyzing(true)
     setVideoData(null)
-
     try {
-      // @ts-ignore
       const data = await window.electron.analyzeUrl({ url, sessData })
       setVideoData(data)
+      setIsModalOpen(true)
     } catch (err) {
-      showToastMsg('解析失败，请检查网络或链接', 'error')
-      setIsModalOpen(false)
-      setLogs((prev) => [...prev, `❌ 解析失败: ${err}`])
+      showToastMsg('解析失败', 'error')
+      setGlobalLogs((prev) => [...prev, `❌ 解析失败: ${err}`])
     } finally {
       setIsAnalyzing(false)
     }
   }
 
-  // 点击“取消下载”按钮
-  const handleCancel = async () => {
-    if (!isDownloading) return
-    try {
-      // @ts-ignore
-      await window.electron.cancelDownload()
-      // 状态更新会在 onComplete (code!=0) 或这里手动处理
-      setIsDownloading(false)
-      setLogs((prev) => [...prev, '⚠️ 用户取消了下载任务'])
-      showToastMsg('下载已取消', 'error')
-      // 重置进度
-      setProgressData({ percent: 0, totalSize: '', currentSize: '' })
-    } catch (err) {
-      console.error(err)
-    }
-  }
-
-  // 模态框确认后，开始真实下载
-  const startRealDownload = (formatId: string | null, isAudioOnly: boolean) => {
+  const handleConfirmDownload = (formatId: string | null) => {
     setIsModalOpen(false)
-    setIsDownloading(true)
-    setLogs(['--- 开始下载任务 ---'])
-    setProgressData({ percent: 0, totalSize: '', currentSize: '' }) // 重置进度
-    setShowLogs(true)
 
-    // @ts-ignore
-    window.electron.startDownload(url, formatId, savePath, isAudioOnly, sessData)
+    const selectedFormat = videoData?.formats.find((f: any) => f.format_id === formatId)
+    if (!selectedFormat) {
+      return showToastMsg('未选择格式或格式无效', 'error')
+    }
+
+    const newTask: DownloadTask = {
+      id: crypto.randomUUID(),
+      url,
+      title: videoData?.title || url,
+      status: 'queued',
+      percent: 0,
+      totalSize: '等待中...',
+      formatId,
+      isAudioOnly: mode === 'audio',
+      savePath,
+      ext: selectedFormat.ext,
+      log: '等待调度...',
+      files: [] // ✅ 新增
+    }
+
+    setTasks((prev) => [...prev, newTask])
+    showToastMsg('已加入下载队列')
+    setUrl('')
   }
 
-  // --- IPC 事件监听 ---
-  useEffect(() => {
-    // 监听进度
-    // @ts-ignore
-    window.electron.onProgress(({ log, percent, totalSize }) => {
-      // 1. 更新日志
-      if (log && log.trim()) setLogs((prev) => [...prev, log].slice(-100))
+  const handleDeleteClick = (task: DownloadTask) => {
+    setTaskToDelete(task)
+    setIsDeleteModalOpen(true)
+  }
 
-      // 2. 更新进度条与大小计算
-      if (percent > 0) {
-        let currentSizeStr = ''
-        // 如果后端传回了总大小 (如 "100 MiB")，我们算出当前已下载大小
-        if (totalSize) {
-          const totalBytes = parseSizeToBytes(totalSize)
-          const currentBytes = totalBytes * (percent / 100)
-          currentSizeStr = formatBytes(currentBytes)
-        }
+  const handleConfirmDelete = async (deleteLocal: boolean) => {
+    if (!taskToDelete) return
+    const cur = taskToDelete
+    console.log('[delete] task.files =', cur.files)
 
-        setProgressData({
-          percent,
-          totalSize: totalSize || '',
-          currentSize: currentSizeStr
-        })
+    try {
+      if (cur.status === 'downloading' || cur.status === 'queued') {
+        await window.electron.cancelDownload(cur.id)
       }
 
-      // 3. 自动滚动日志
-      if (showLogs) logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    })
-
-    // 监听完成
-    // @ts-ignore
-    window.electron.onComplete((code) => {
-      setIsDownloading(false)
-
-      if (code === 0) {
-        // 成功：进度条补满
-        setProgressData((prev) => ({ ...prev, percent: 100 }))
-        showToastMsg('下载成功！文件已保存')
-        setLogs((prev) => [...prev, '✨ 任务完成！'])
-      } else {
-        // 失败或取消
-        // 如果是取消，通常由 handleCancel 处理提示，这里主要处理异常退出
-        if (progressData.percent < 100) {
-          // 此时如果不为0可能是报错
-          // showToastMsg('下载未完成', 'error');
+      if (deleteLocal) {
+        // ✅ 优先删真实路径数组（包含 .part、合并 mp4、中间文件等）
+        if (cur.files && cur.files.length > 0) {
+          // ✅ 推荐：真实路径删除（最准）
+          const paths = Array.from(
+            new Set([
+              ...cur.files,
+              ...cur.files.map((p) => (p.endsWith('.part') ? p : `${p}.part`))
+            ])
+          )
+          await window.electron.deleteLocalFiles(paths)
+        } else if (cur.status === 'completed') {
+          // 兜底：旧接口（不推荐，但兼容）
+          const ok = await window.electron.deleteLocalFile(cur.savePath, cur.title, cur.ext)
+          if (ok) showToastMsg(`已删除本地文件: ${cur.title}.${cur.ext}`)
+          else showToastMsg('删除本地文件失败，请手动处理', 'error')
         }
-        setLogs((prev) => [...prev, `❌ 进程结束 (代码: ${code})`])
       }
-    })
 
-    // 监听错误
-    // @ts-ignore
-    window.electron.onError((err) => setLogs((prev) => [...prev, `❌ 错误: ${err}`]))
-
-    return () => {
-      // @ts-ignore
-      if (window.electron.removeListeners) window.electron.removeListeners()
+      setTasks((prev) => prev.filter((t) => t.id !== cur.id))
+      showToastMsg(`任务 ${cur.title} 已移除`, 'success')
+    } catch (e: any) {
+      showToastMsg(`删除失败: ${String(e)}`, 'error')
+    } finally {
+      setIsDeleteModalOpen(false)
+      setTaskToDelete(null)
     }
-  }, [showLogs, progressData.percent]) // 依赖项加入 progressData.percent 并非必须，但有助于逻辑追踪
+  }
+
+  const handleCancelTask = async (id: string) => {
+    try {
+      const ok = await window.electron.cancelDownload(id)
+      if (!ok) {
+        showToastMsg('取消失败：未找到下载进程', 'error')
+        return
+      }
+      setTasks((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, status: 'canceled', log: '任务已取消' } : t))
+      )
+      showToastMsg('任务已取消', 'error')
+    } catch (e: any) {
+      showToastMsg(`取消失败: ${String(e)}`, 'error')
+    }
+  }
+
+  const handleSelectFolder = async () => {
+    const path = await window.electron.selectFolder()
+    if (path) setSavePath(path)
+  }
+
+  const visibleTasks = tasks
+    .filter((t) => {
+      if (tab === 'active') return t.status === 'downloading' || t.status === 'queued'
+      if (tab === 'completed')
+        return t.status === 'completed' || t.status === 'canceled' || t.status === 'error'
+      return true
+    })
+    .sort((a, b) => {
+      const statusOrder: any = { downloading: 1, queued: 2, error: 3, canceled: 4, completed: 5 }
+      return (statusOrder[a.status] || 9) - (statusOrder[b.status] || 9)
+    })
+
+  function getStatusText(status: string) {
+    switch (status) {
+      case 'queued':
+        return '排队中'
+      case 'downloading':
+        return '下载中'
+      case 'completed':
+        return '完成'
+      case 'error':
+        return '错误'
+      case 'canceled':
+        return '已取消'
+      default:
+        return ''
+    }
+  }
+
+  function getStatusIcon(status: string) {
+    switch (status) {
+      case 'queued':
+        return <Clock size={12} />
+      case 'downloading':
+        return <Download size={12} />
+      case 'completed':
+        return <CheckCircle2 size={12} />
+      case 'error':
+        return <AlertCircle size={12} />
+      case 'canceled':
+        return <X size={12} />
+      default:
+        return null
+    }
+  }
+
+  function getStatusColor(status: string) {
+    if (status === 'error' || status === 'canceled') return '#e91429'
+    if (status === 'completed') return '#1db954'
+    if (status === 'queued') return '#b3b3b3'
+    return '#1db954'
+  }
 
   return (
-    <div className="container">
-      {/* 1. 顶部标题 */}
-      <div className="header">
-        <Music2 size={32} color="#1db954" />
-        <h1>Downloader Pro</h1>
-      </div>
-
-      {/* 2. 主操作卡片 */}
-      <div className="input-card">
-        {/* URL 输入 */}
-        <div className="input-wrapper">
-          <Link2 className="input-icon" size={18} />
-          <input
-            type="text"
-            className="styled-input"
-            placeholder="粘贴 Bilibili / YouTube 链接..."
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            disabled={isDownloading}
-          />
+    <div className="app-layout">
+      <div className="left-panel">
+        <div className="header">
+          <Music2 size={32} color="#1db954" />
+          <h1 style={{ fontSize: '24px', margin: 0 }}>Downloader Pro</h1>
         </div>
 
-        {/* Cookie 管理组件 */}
-        <CookieManager
-          sessData={sessData}
-          setSessData={setSessData}
-          handleLogin={handleLogin}
-          showToastMsg={showToastMsg}
-        />
-
-        {/* 选项栏：模式选择 + 目录选择 */}
-        <div className="options-row">
-          <div style={{ flex: 1 }}>
-            <CustomSelect
-              value={mode}
-              onChange={setMode}
-              options={[
-                { value: 'video', label: '视频 (Video)' },
-                { value: 'audio', label: '音频 (Audio Only)' }
-              ]}
+        <div className="input-card">
+          <div className="input-wrapper">
+            <Link2 className="input-icon" size={18} />
+            <input
+              type="text"
+              className="styled-input"
+              placeholder="输入链接..."
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
             />
           </div>
-          <button className="icon-btn" onClick={handleSelectFolder} disabled={isDownloading}>
-            <FolderOpen size={16} />
-            <span>{savePath ? '更改目录' : '选择目录...'}</span>
-          </button>
-        </div>
 
-        {savePath && <div className="path-text">保存至: {savePath}</div>}
+          {url && url.includes('bilibili') ? (
+            <CookieManager
+              sessData={sessData}
+              setSessData={setSessData}
+              handleLogin={async () => {
+                const c = await window.electron.openLoginWindow()
+                if (c) {
+                  setSessData(c)
+                  showToastMsg('登录成功')
+                }
+              }}
+              showToastMsg={showToastMsg}
+            />
+          ) : null}
 
-        {/* 下载/取消 按钮区域 */}
-        {isDownloading ? (
+          <div className="options-row">
+            <div style={{ flex: 1 }}>
+              <CustomSelect
+                value={mode}
+                onChange={setMode}
+                options={[
+                  { value: 'video', label: '视频' },
+                  { value: 'audio', label: '音频' }
+                ]}
+              />
+            </div>
+            <button className="icon-btn" onClick={handleSelectFolder}>
+              <FolderOpen size={16} /> 目录
+            </button>
+          </div>
+
           <button
             className="download-btn"
-            onClick={handleCancel}
-            style={{ backgroundColor: '#e91429', color: 'white' }} // 红色样式
+            onClick={handleAnalyze}
+            disabled={isAnalyzing || !savePath}
+            style={{ marginTop: '15px' }}
           >
-            <XCircle size={20} />
-            <span>取消下载 (Cancel)</span>
+            {isAnalyzing ? '正在解析...' : '解析链接'} <Download size={20} />
           </button>
-        ) : (
-          <button className="download-btn" onClick={handleAnalyze} disabled={isDownloading}>
-            {mode === 'audio' ? 'Analyze Audio' : 'Analyze Video'}
-            <Download size={20} />
-          </button>
-        )}
-      </div>
+          <span style={{ fontSize: '12px', color: savePath ? '#999' : 'var(--error)' }}>
+            {savePath ? `保存至: ${savePath}` : '请先选择保存目录'}
+          </span>
+        </div>
 
-      {/* 3. 进度条区域 (仅在有进度或下载中显示) */}
-      {(progressData.percent > 0 || isDownloading) && (
-        <div className="progress-section">
-          <div className="progress-bar-bg">
-            <div className="progress-bar-fill" style={{ width: `${progressData.percent}%` }} />
+        <div className="logs-container" style={{ flex: 1, marginTop: '20px', minHeight: '150px' }}>
+          <div className="logs-header">
+            <Terminal size={14} /> <span>全局日志</span>
           </div>
+          <div className="logs-content">
+            {globalLogs.map((log, i) => (
+              <div key={i}>{log}</div>
+            ))}
+            <div ref={logEndRef} />
+          </div>
+        </div>
+
+        <div className="settings-row">
           <div
             style={{
               display: 'flex',
               justifyContent: 'space-between',
-              fontSize: '12px',
-              marginTop: '4px',
-              color: '#b3b3b3'
+              marginBottom: '10px',
+              fontSize: '14px',
+              color: '#ccc'
             }}
           >
-            {/* 左侧：当前大小 / 总大小 */}
-            <span>
-              {progressData.totalSize
-                ? `${progressData.currentSize} / ${progressData.totalSize}`
-                : isDownloading
-                  ? '准备中...'
-                  : ''}
+            <span style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
+              <Settings size={14} /> 最大并发数
             </span>
-            {/* 右侧：百分比 */}
-            <span>{progressData.percent.toFixed(1)}%</span>
+            <span>{maxConcurrent} / 10</span>
           </div>
-        </div>
-      )}
-
-      {/* 4. 日志区域 (自适应高度) */}
-      <div
-        className="logs-container"
-        style={{ flex: showLogs ? 1 : '0 0 auto', minHeight: showLogs ? '100px' : '0' }}
-      >
-        <div className="logs-header" onClick={() => setShowLogs(!showLogs)}>
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            <Terminal size={14} /> <span>运行日志</span>
-          </div>
-          {showLogs ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        </div>
-        <div
-          className="logs-content"
-          style={{ opacity: showLogs ? 1 : 0, display: showLogs ? 'block' : 'none' }}
-        >
-          {logs.map((log, i) => (
-            <div key={i} style={{ whiteSpace: 'pre-wrap' }}>
-              {log}
-            </div>
-          ))}
-          <div ref={logEndRef} />
+          <input
+            type="range"
+            min="1"
+            max="10"
+            value={maxConcurrent}
+            onChange={(e) => setMaxConcurrent(parseInt(e.target.value))}
+            className="range-input"
+          />
         </div>
       </div>
 
-      {/* 5. 弹窗组件 */}
+      <div className="right-panel">
+        <div className="tabs">
+          <button
+            className={`tab-btn ${tab === 'all' ? 'active' : ''}`}
+            onClick={() => setTab('all')}
+          >
+            全部 ({tasks.length})
+          </button>
+          <button
+            className={`tab-btn ${tab === 'active' ? 'active' : ''}`}
+            onClick={() => setTab('active')}
+          >
+            进行中 (
+            {tasks.filter((t) => t.status === 'downloading' || t.status === 'queued').length})
+          </button>
+          <button
+            className={`tab-btn ${tab === 'completed' ? 'active' : ''}`}
+            onClick={() => setTab('completed')}
+          >
+            历史 ({tasks.filter((t) => t.status !== 'downloading' && t.status !== 'queued').length})
+          </button>
+        </div>
+
+        <div className="download-list">
+          {visibleTasks.length === 0 && (
+            <div style={{ textAlign: 'center', marginTop: '100px', color: '#555' }}>
+              <div style={{ fontSize: '40px', marginBottom: '10px' }}>📭</div>
+              {tab === 'all' && '没有任务，快去解析一个链接吧！'}
+              {tab === 'active' && '当前没有任务正在下载或排队。'}
+              {tab === 'completed' && '历史任务列表为空。'}
+            </div>
+          )}
+
+          {visibleTasks.map((task) => (
+            <div key={task.id} className="download-item">
+              <div className="item-icon" style={{ backgroundColor: getStatusColor(task.status) }}>
+                {task.isAudioOnly ? (
+                  <Music2 size={20} color="black" />
+                ) : (
+                  <Film size={20} color="black" />
+                )}
+              </div>
+
+              <div className="item-info">
+                <div className="item-title" title={task.title}>
+                  {task.title}
+                </div>
+                <div className="item-meta">
+                  <span
+                    style={{
+                      display: 'flex',
+                      gap: '5px',
+                      alignItems: 'center',
+                      color: getStatusColor(task.status)
+                    }}
+                  >
+                    {getStatusIcon(task.status)}
+                    {getStatusText(task.status)} ({task.percent.toFixed(1)}%)
+                  </span>
+                  <span>{task.totalSize}</span>
+                </div>
+
+                <div className="item-progress-bg">
+                  <div
+                    className="item-progress-fill"
+                    style={{
+                      width: `${task.percent}%`,
+                      backgroundColor: getStatusColor(task.status)
+                    }}
+                  />
+                </div>
+
+                <div
+                  style={{
+                    fontSize: '12px',
+                    color: '#666',
+                    marginTop: '4px',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap'
+                  }}
+                >
+                  {task.log}
+                </div>
+              </div>
+
+              <div>
+                {task.status === 'downloading' || task.status === 'queued' ? (
+                  <button
+                    onClick={() => handleCancelTask(task.id)}
+                    className="icon-btn"
+                    style={{ backgroundColor: 'var(--error)', padding: '8px' }}
+                  >
+                    <X size={18} color="white" />
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => handleDeleteClick(task)}
+                    className="icon-btn"
+                    style={{
+                      backgroundColor: 'transparent',
+                      border: '1px solid var(--border)',
+                      padding: '8px'
+                    }}
+                  >
+                    <Trash2 size={18} color="var(--text-sub)" />
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
       <ConfirmModal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
-        onConfirm={(fmtId) => startRealDownload(fmtId, mode === 'audio')}
-        isLoading={isAnalyzing}
+        onConfirm={handleConfirmDownload}
         data={videoData}
         mode={mode}
       />
 
-      {/* 6. 全局提示 */}
-      <Toast
-        show={toast.show}
-        message={toast.message}
-        type={toast.type}
-        onClose={() => setToast((prev) => ({ ...prev, show: false }))}
+      <ConfirmDeleteModal
+        isOpen={isDeleteModalOpen}
+        onClose={() => setIsDeleteModalOpen(false)}
+        onConfirm={handleConfirmDelete}
+        taskTitle={taskToDelete?.title || '未知任务'}
       />
+
+      <Toast {...toast} onClose={() => setToast((p) => ({ ...p, show: false }))} />
     </div>
   )
 }

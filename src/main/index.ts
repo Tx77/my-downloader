@@ -77,8 +77,10 @@ function setupAutoUpdater(mainWindow: BrowserWindow) {
 function createWindow(): void {
   // 创建浏览器窗口
   const mainWindow = new BrowserWindow({
-    width: 900,
-    height: 670,
+    width: 1200, // 👈 调大宽度
+    height: 800, // 👈 调大高度
+    minWidth: 1000, // 设置最小宽度
+    minHeight: 600,
     show: false, // 等待 ready-to-show 再显示，防止白屏
     autoHideMenuBar: true,
     ...(process.platform === 'linux' ? { icon } : {}),

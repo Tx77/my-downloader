@@ -1,6 +1,6 @@
 {
   "name": "my-downloader",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "An Electron application with React and TypeScript",
   "main": "./out/main/index.js",
   "author": "example.com",
@@ -16,7 +16,7 @@
     "build": "npm run typecheck && electron-vite build",
     "postinstall": "electron-builder install-app-deps",
     "build:unpack": "npm run build && electron-builder --dir",
-    "build:win": "npm run build && electron-builder --win",
+    "build:win": "electron-vite build && electron-builder --win",
     "build:mac": "electron-vite build && electron-builder --mac",
     "build:linux": "electron-vite build && electron-builder --linux"
   },
@@ -25,6 +25,7 @@
     "@electron-toolkit/utils": "^4.0.0",
     "electron-store": "6.0.1",
     "electron-updater": "^6.6.2",
+    "iconv-lite": "^0.7.1",
     "lucide-react": "^0.561.0"
   },
   "devDependencies": {
