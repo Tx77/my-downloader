@@ -73,6 +73,8 @@ const api = {
 
   // 保留：如果你之前有用到（目前主进程没有 delete-file handler）
   deleteFile: (path: string) => ipcRenderer.invoke('delete-file', path),
+  getTasks: () => ipcRenderer.invoke('get-tasks'),
+  setTasks: (tasks) => ipcRenderer.invoke('set-tasks', tasks),
 
   // 如果你还要用 electron-toolkit 的 api，也可以暴露
   electronAPI

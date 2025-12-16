@@ -26,6 +26,13 @@ const getQualityString = (f: any): string => {
 }
 
 export function setupIpcHandlers(mainWindow: BrowserWindow) {
+  // --- 任务持久化 ---
+  ipcMain.handle('get-tasks', () => store.get('tasks', []))
+  ipcMain.handle('set-tasks', (_event, tasks) => {
+    store.set('tasks', tasks || [])
+    return true
+  })
+
   // --- 基础配置 ---
   ipcMain.handle('get-saved-path', () => store.get('downloadPath', ''))
   ipcMain.handle('get-cookie', () => store.get('sessData', ''))

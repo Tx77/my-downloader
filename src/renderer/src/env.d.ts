@@ -46,6 +46,8 @@ declare global {
 
       // 兼容保留（如果你旧代码还在用）
       deleteFile: (path: string) => Promise<boolean>
+      getTasks: () => Promise<any[]>
+      setTasks: (tasks: any[]) => Promise<boolean>
     }
   }
 }

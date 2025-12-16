@@ -1,63 +1,70 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { X, AlertTriangle, Trash2 } from 'lucide-react'
-// 注意：这个组件使用和 ConfirmModal 相似的 CSS 结构，但为了样式独立，
-// 最好为它创建或复用一个 CSS 文件。这里我们使用 ConfirmModal.css。
-import './index.css' // 暂时复用 ConfirmModal 的基础样式
+import './index.css'
 
 interface ConfirmDeleteModalProps {
   isOpen: boolean
   onClose: () => void
   onConfirm: (deleteLocal: boolean) => void
-  taskTitle: string // 要删除的任务名称
+
+  // 单个删除：传 taskTitle
+  taskTitle?: string
+
+  // 批量删除：传 count + isBatch
+  count?: number
+  isBatch?: boolean
 }
 
 export function ConfirmDeleteModal({
   isOpen,
   onClose,
   onConfirm,
-  taskTitle
+  taskTitle,
+  count = 0,
+  isBatch = false
 }: ConfirmDeleteModalProps) {
-  // 默认不删除本地文件
   const [deleteLocal, setDeleteLocal] = useState(false)
+
+  // ✅ 每次打开都重置，避免继承上一次勾选状态
+  useEffect(() => {
+    if (isOpen) setDeleteLocal(false)
+  }, [isOpen, taskTitle, count, isBatch])
 
   if (!isOpen) return null
 
-  const handleConfirm = () => {
-    onConfirm(deleteLocal)
-    setDeleteLocal(false) // 重置状态
-  }
+  const handleConfirm = () => onConfirm(deleteLocal)
+  const handleClose = () => onClose()
 
-  const handleClose = () => {
-    onClose()
-    setDeleteLocal(false) // 重置状态
-  }
+  const titleText = isBatch ? '确认批量删除任务' : '确认删除任务'
+  const mainLine = isBatch
+    ? `确定要删除全部任务（共 ${count} 个）吗？`
+    : `确定要删除任务：${taskTitle || '未知任务'} 吗？`
 
   return (
     <div className="modal-overlay" onClick={handleClose}>
       <div
         className="modal-content"
         onClick={(e) => e.stopPropagation()}
-        style={{ width: '400px' }}
+        style={{ width: '420px' }}
       >
-        {/* 头部：标题 + 关闭按钮 */}
         <div className="modal-header">
           <h3 className="modal-title" style={{ color: 'var(--error)' }}>
-            <AlertTriangle size={24} style={{ marginRight: '10px' }} /> 确认删除任务
+            <AlertTriangle size={24} style={{ marginRight: '10px' }} /> {titleText}
           </h3>
           <button className="close-btn" onClick={handleClose} title="关闭">
             <X size={20} />
           </button>
         </div>
 
-        {/* 警告信息 */}
         <div style={{ marginBottom: '20px', fontSize: '14px', color: 'var(--text-sub)' }}>
           <p style={{ margin: '0 0 10px 0' }}>
-            确定要删除任务：<b style={{ color: 'white' }}>{taskTitle}</b> 吗？
+            <b style={{ color: 'white' }}>{mainLine}</b>
           </p>
-          <p style={{ margin: 0, color: 'var(--error)' }}>此操作不可撤销！</p>
+          <p style={{ margin: 0, color: 'var(--error)' }}>
+            {isBatch ? '该操作将清空列表记录，且不可撤销！' : '此操作不可撤销！'}
+          </p>
         </div>
 
-        {/* 选项：是否删除本地资源 */}
         <div
           style={{
             marginBottom: '24px',
@@ -81,12 +88,13 @@ export function ConfirmDeleteModal({
               }}
             />
             <Trash2 size={16} color="var(--error)" style={{ marginRight: '5px' }} />
-            <b style={{ color: 'var(--error)' }}>同时删除本地文件</b>
+            <b style={{ color: 'var(--error)' }}>
+              {isBatch ? '同时删除本地文件（批量）' : '同时删除本地文件'}
+            </b>
             <span style={{ color: 'var(--text-sub)', marginLeft: '8px' }}>(谨慎操作)</span>
           </label>
         </div>
 
-        {/* 底部按钮 */}
         <div className="modal-actions">
           <button className="modal-btn cancel" onClick={handleClose}>
             取消
@@ -96,7 +104,7 @@ export function ConfirmDeleteModal({
             onClick={handleConfirm}
             style={{ backgroundColor: 'var(--error)' }}
           >
-            确认删除
+            {isBatch ? '确认删除全部' : '确认删除'}
           </button>
         </div>
       </div>

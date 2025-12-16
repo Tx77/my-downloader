@@ -68,7 +68,12 @@ export function ConfirmModal({ isOpen, onClose, onConfirm, data, mode }: Confirm
         </div>
 
         <div className="video-info">
-          <img src={data.thumbnail} alt={data.title} className="thumbnail" />
+          <img
+            src={data.thumbnail}
+            alt={data.title}
+            className="thumbnail"
+            referrerPolicy="no-referrer"
+          />
           <div className="info-text">
             <h4 className="video-title" title={data.title}>
               {data.title}

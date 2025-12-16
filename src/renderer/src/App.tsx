@@ -58,14 +58,34 @@ function App(): JSX.Element {
 
   const [globalLogs, setGlobalLogs] = useState<string[]>([])
   const logEndRef = useRef<HTMLDivElement>(null)
+  const persistTimerRef = useRef<any>(null)
+  const tasksLoadedRef = useRef(false)
+
+  const [deleteTargets, setDeleteTargets] = useState<DownloadTask[]>([])
+  const [deleteMode, setDeleteMode] = useState<'single' | 'bulk'>('single')
 
   useEffect(() => {
     const init = async () => {
+      // @ts-ignore
+      const savedTasks = await window.electron.getTasks?.()
+      if (Array.isArray(savedTasks) && savedTasks.length) {
+        // 重启后，未完成任务统一标记为中断
+        const fixed = savedTasks.map((t) => {
+          if (t.status === 'downloading' || t.status === 'queued') {
+            return { ...t, status: 'error', log: '应用重启，任务中断' }
+          }
+          return t
+        })
+        setTasks(fixed)
+      }
+
       const path = await window.electron.getSavedPath()
       if (path) setSavePath(path)
 
       const cookie = await window.electron.getCookie()
       if (cookie) setSessData(cookie)
+
+      tasksLoadedRef.current = true
     }
     init()
 
@@ -103,16 +123,26 @@ function App(): JSX.Element {
     })
 
     // 完成：已取消的不再覆盖
+    // @ts-ignore
     window.electron.onComplete(({ id, code }) => {
       setTasks((prev) =>
         prev.map((t) => {
           if (t.id === id) {
             const ok = code === 0
+
+            // 🔥 修复逻辑：如果是“计算中...”或“等待中...”，则强制改为“已完成”或保持原样
+            let finalSize = t.totalSize
+            if (ok) {
+              if (t.totalSize === '计算中...' || t.totalSize === '等待中...') {
+                finalSize = '未知大小' // 或者可以直接显示 '已完成'
+              }
+            }
+
             return {
               ...t,
               status: ok ? 'completed' : 'error',
               percent: ok ? 100 : t.percent,
-              totalSize: ok ? (t.totalSize === '等待中...' ? '已完成' : t.totalSize) : t.totalSize, // ✅ 新增
+              totalSize: finalSize, // 使用修正后的大小
               log: ok ? '下载成功' : '下载失败'
             }
           }
@@ -148,6 +178,21 @@ function App(): JSX.Element {
     }
   }, [])
 
+  // ✅ 新增：tasks 变化时持久化（单独一个 useEffect）
+  useEffect(() => {
+    if (!window.electron.setTasks) return
+    if (!tasksLoadedRef.current) return
+
+    if (persistTimerRef.current) clearTimeout(persistTimerRef.current)
+    persistTimerRef.current = setTimeout(() => {
+      window.electron.setTasks(tasks)
+    }, 500)
+
+    return () => {
+      if (persistTimerRef.current) clearTimeout(persistTimerRef.current)
+    }
+  }, [tasks])
+
   // --- 调度器 ---
   useEffect(() => {
     const activeCount = tasks.filter((t) => t.status === 'downloading').length
@@ -160,7 +205,16 @@ function App(): JSX.Element {
 
   const startTask = (task: DownloadTask) => {
     setTasks((prev) =>
-      prev.map((t) => (t.id === task.id ? { ...t, status: 'downloading', log: '正在连接...' } : t))
+      prev.map((t) =>
+        t.id === task.id
+          ? {
+              ...t,
+              status: 'downloading',
+              log: '正在连接...',
+              totalSize: '计算中...' // 确保开始时重置
+            }
+          : t
+      )
     )
 
     window.electron.startDownload(
@@ -224,47 +278,64 @@ function App(): JSX.Element {
   }
 
   const handleDeleteClick = (task: DownloadTask) => {
-    setTaskToDelete(task)
+    setDeleteMode('single')
+    setDeleteTargets([task])
+    setIsDeleteModalOpen(true)
+  }
+
+  const handleDeleteAllClick = () => {
+    if (tasks.length === 0) return
+    setDeleteMode('bulk')
+    setDeleteTargets([...tasks]) // 或者用 visibleTasks：只删除当前筛选页
     setIsDeleteModalOpen(true)
   }
 
   const handleConfirmDelete = async (deleteLocal: boolean) => {
-    if (!taskToDelete) return
-    const cur = taskToDelete
-    console.log('[delete] task.files =', cur.files)
+    if (!deleteTargets.length) return
 
-    try {
-      if (cur.status === 'downloading' || cur.status === 'queued') {
-        await window.electron.cancelDownload(cur.id)
-      }
+    // ✅ 先关弹窗
+    setIsDeleteModalOpen(false)
 
-      if (deleteLocal) {
-        // ✅ 优先删真实路径数组（包含 .part、合并 mp4、中间文件等）
-        if (cur.files && cur.files.length > 0) {
-          // ✅ 推荐：真实路径删除（最准）
-          const paths = Array.from(
-            new Set([
-              ...cur.files,
-              ...cur.files.map((p) => (p.endsWith('.part') ? p : `${p}.part`))
-            ])
-          )
-          await window.electron.deleteLocalFiles(paths)
-        } else if (cur.status === 'completed') {
-          // 兜底：旧接口（不推荐，但兼容）
-          const ok = await window.electron.deleteLocalFile(cur.savePath, cur.title, cur.ext)
-          if (ok) showToastMsg(`已删除本地文件: ${cur.title}.${cur.ext}`)
-          else showToastMsg('删除本地文件失败，请手动处理', 'error')
+    const targets = [...deleteTargets]
+    setDeleteTargets([])
+
+    // 1) 先取消所有 downloading/queued（不删除记录也可以，但批量一般直接清）
+    const needCancel = targets.filter((t) => t.status === 'downloading' || t.status === 'queued')
+    await Promise.allSettled(needCancel.map((t) => window.electron.cancelDownload(t.id)))
+
+    // 2) 删除本地文件（只删 completed；你想 error/canceled 也删的话可加条件）
+    if (deleteLocal) {
+      // 汇总路径（优先用 files，最精准）
+      const paths: string[] = []
+      for (const t of targets) {
+        if (t.status !== 'completed') continue
+
+        if (Array.isArray(t.files) && t.files.length > 0) {
+          for (const p of t.files) {
+            paths.push(p)
+            // 顺手删 .part（如果存在）
+            if (!p.endsWith('.part')) paths.push(`${p}.part`)
+          }
+        } else {
+          // 兜底：老的按 title/ext（可能命不中，但不影响主流程）
+          // @ts-ignore
+          await window.electron.deleteLocalFile(t.savePath, t.title, t.ext)
         }
       }
 
-      setTasks((prev) => prev.filter((t) => t.id !== cur.id))
-      showToastMsg(`任务 ${cur.title} 已移除`, 'success')
-    } catch (e: any) {
-      showToastMsg(`删除失败: ${String(e)}`, 'error')
-    } finally {
-      setIsDeleteModalOpen(false)
-      setTaskToDelete(null)
+      const uniq = Array.from(new Set(paths)).filter(Boolean)
+
+      // 如果你有 deleteLocalFiles（推荐）
+      if (uniq.length && window.electron.deleteLocalFiles) {
+        await window.electron.deleteLocalFiles(uniq)
+      }
     }
+
+    // 3) 从列表移除（批量=清空；单个=移除一个）
+    const removeIds = new Set(targets.map((t) => t.id))
+    setTasks((prev) => prev.filter((t) => !removeIds.has(t.id)))
+
+    showToastMsg(deleteMode === 'bulk' ? '已删除全部任务记录' : '任务已移除', 'success')
   }
 
   const handleCancelTask = async (id: string) => {
@@ -295,6 +366,7 @@ function App(): JSX.Element {
         return t.status === 'completed' || t.status === 'canceled' || t.status === 'error'
       return true
     })
+
     .sort((a, b) => {
       const statusOrder: any = { downloading: 1, queued: 2, error: 3, canceled: 4, completed: 5 }
       return (statusOrder[a.status] || 9) - (statusOrder[b.status] || 9)
@@ -464,6 +536,19 @@ function App(): JSX.Element {
           >
             历史 ({tasks.filter((t) => t.status !== 'downloading' && t.status !== 'queued').length})
           </button>
+
+          <button
+            className="tab-btn"
+            onClick={handleDeleteAllClick}
+            disabled={tasks.length === 0}
+            style={{
+              marginLeft: 'auto',
+              border: '1px solid var(--border)',
+              color: 'var(--error)'
+            }}
+          >
+            删除全部
+          </button>
         </div>
 
         <div className="download-list">
@@ -569,7 +654,9 @@ function App(): JSX.Element {
         isOpen={isDeleteModalOpen}
         onClose={() => setIsDeleteModalOpen(false)}
         onConfirm={handleConfirmDelete}
-        taskTitle={taskToDelete?.title || '未知任务'}
+        taskTitle={deleteMode === 'single' ? deleteTargets[0]?.title || '未知任务' : undefined}
+        isBatch={deleteMode === 'bulk'}
+        count={deleteMode === 'bulk' ? deleteTargets.length : 0}
       />
 
       <Toast {...toast} onClose={() => setToast((p) => ({ ...p, show: false }))} />
