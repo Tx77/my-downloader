@@ -1,0 +1,48 @@
+appId: com.electron.downloader
+productName: Downloader Pro
+directories:
+  buildResources: build
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - out
+
+# ⚠️ 关键优化：不需要 asarUnpack，因为 extraResources 已经把它们放出去了
+# asarUnpack:
+#   - resources/** # ⚠️ 核心配置：将 resources/bin 下的 exe 复制到打包后的 resources/bin
+extraResources:
+  - from: resources/bin
+    to: bin
+    filter:
+      - '**/*'
+
+nsis:
+  artifactName: ${name}-${version}-setup.${ext}
+  shortcutName: ${productName}
+  uninstallDisplayName: ${productName}
+  createDesktopShortcut: always
+  oneClick: false # 建议设为 false，允许用户选择安装目录
+  allowToChangeInstallationDirectory: true
+
+win:
+  executableName: DownloaderPro
+  target: nsis
+  icon: resources/icon.png
+  # 申请管理员权限，防止写入磁盘被拦截（可选，通常不需要）
+  # requestedExecutionLevel: requireAdministrator
+
+# 如果你想用 GitHub 做自动更新
+publish:
+  provider: github
+  owner: your-github-username # 替换你的 GitHub 用户名
+  repo: your-repo-name # 替换你的仓库名
+  # private: true              # 如果是私有仓库，需要配置 token
+
+# 如果你还是想用 generic (私有服务器)
+# publish:
+#   provider: generic
+#   url: https://your-server.com/download/
