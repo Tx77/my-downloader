@@ -11,7 +11,7 @@ export const getBinaryPath = (binaryName: string) => {
 
 export const getProxyArgs = (url: string) => {
   if (url.includes('youtube.com') || url.includes('youtu.be')) {
-    return ['--proxy', 'http://127.0.0.1:7890']
+    return ['--proxy', 'http://127.0.0.1:6789']
   }
   return []
 }
