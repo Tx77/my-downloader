@@ -7,6 +7,7 @@ const api = {
   getCookie: () => ipcRenderer.invoke('get-cookie'),
   setCookie: (val: string) => ipcRenderer.invoke('set-cookie', val),
   selectFolder: () => ipcRenderer.invoke('select-folder'),
+  showItemInFolder: (filePath: string) => ipcRenderer.invoke('show-item-in-folder', filePath),
   openLoginWindow: () => ipcRenderer.invoke('open-login-window'),
   analyzeUrl: (args: { url: string; sessData: string }) => ipcRenderer.invoke('analyze-url', args),
 

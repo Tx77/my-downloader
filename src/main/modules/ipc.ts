@@ -1,8 +1,8 @@
-import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { ipcMain, dialog, BrowserWindow, shell } from 'electron'
 import { spawn } from 'child_process'
 import Store from 'electron-store'
 import * as fs from 'fs/promises'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { getBinaryPath, getProxyArgs } from './utils'
 import { createCookieFile, cleanupCookieFile } from './cookie'
 
@@ -25,7 +25,7 @@ const getQualityString = (f: any): string => {
   return 'Audio Only'
 }
 
-export function setupIpcHandlers(mainWindow: BrowserWindow) {
+export function setupIpcHandlers(_mainWindow: BrowserWindow) {
   // --- 任务持久化 ---
   ipcMain.handle('get-tasks', () => store.get('tasks', []))
   ipcMain.handle('set-tasks', (_event, tasks) => {
@@ -37,6 +37,34 @@ export function setupIpcHandlers(mainWindow: BrowserWindow) {
   ipcMain.handle('get-saved-path', () => store.get('downloadPath', ''))
   ipcMain.handle('get-cookie', () => store.get('sessData', ''))
   ipcMain.handle('set-cookie', (_event, val) => store.set('sessData', val))
+  ipcMain.handle('show-item-in-folder', async (_event, filePath: string) => {
+    try {
+      if (!filePath || typeof filePath !== 'string') return false
+      const target = filePath.replace(/\r?\n/g, '').replace(/^"+|"+$/g, '').trim()
+      if (!target) return false
+
+      try {
+        const st = await fs.stat(target)
+        if (st.isDirectory()) {
+          const openErr = await shell.openPath(target)
+          return !openErr
+        }
+        shell.showItemInFolder(target)
+        return true
+      } catch {
+        const parent = dirname(target)
+        const pst = await fs.stat(parent).catch(() => null)
+        if (pst?.isDirectory()) {
+          const openErr = await shell.openPath(parent)
+          return !openErr
+        }
+        return false
+      }
+    } catch (e) {
+      console.error('[show-item-in-folder] failed:', e)
+      return false
+    }
+  })
 
   ipcMain.handle('select-folder', async () => {
     const { filePaths } = await dialog.showOpenDialog({ properties: ['openDirectory'] })

@@ -38,8 +38,8 @@ export function ConfirmModal({ isOpen, onClose, onConfirm, data, mode }: Confirm
         // 只展示“纯音频”
         return f.vcodec === 'none' && f.acodec && f.acodec !== 'none'
       }
-      // video：只展示含视频流的（video-only 或 progressive）
-      return f.vcodec && f.vcodec !== 'none'
+      // video：只要不是明确“无视频流”，都允许展示（兼容部分站点字段缺失）
+      return f.vcodec !== 'none'
     })
   }, [data, mode])
 
@@ -54,7 +54,7 @@ export function ConfirmModal({ isOpen, onClose, onConfirm, data, mode }: Confirm
   if (!isOpen || !data) return null
 
   const handleConfirm = () => {
-    onConfirm(selectedId)
+    onConfirm(formatsToShow.length > 0 ? selectedId : null)
   }
 
   return (
@@ -91,41 +91,47 @@ export function ConfirmModal({ isOpen, onClose, onConfirm, data, mode }: Confirm
         <div className="format-section-title">选择画质 / 格式</div>
 
         <div className="format-list">
-          {formatsToShow.map((format) => (
-            <label
-              key={format.format_id}
-              className={`format-item ${selectedId === format.format_id ? 'selected' : ''}`}
-            >
-              <input
-                type="radio"
-                name="format"
-                checked={selectedId === format.format_id}
-                onChange={() => setSelectedId(format.format_id)}
-              />
-              <div className="format-details">
-                <span className="format-resolution">{format.resolution}</span>
+          {formatsToShow.length > 0 ? (
+            formatsToShow.map((format) => (
+              <label
+                key={format.format_id}
+                className={`format-item ${selectedId === format.format_id ? 'selected' : ''}`}
+              >
+                <input
+                  type="radio"
+                  name="format"
+                  checked={selectedId === format.format_id}
+                  onChange={() => setSelectedId(format.format_id)}
+                />
+                <div className="format-details">
+                  <span className="format-resolution">{format.resolution}</span>
 
-                <div className="format-meta">
-                  <span>{format.filesize}</span>
-                  <span style={{ textTransform: 'uppercase' }}>{format.ext}</span>
+                  <div className="format-meta">
+                    <span>{format.filesize}</span>
+                    <span style={{ textTransform: 'uppercase' }}>{format.ext}</span>
 
-                  {format.vcodec && format.vcodec !== 'none' && (
-                    <span
-                      title={format.vcodec}
-                      style={{
-                        maxWidth: 60,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap'
-                      }}
-                    >
-                      {format.vcodec.split('.')[0]}
-                    </span>
-                  )}
+                    {format.vcodec && format.vcodec !== 'none' && (
+                      <span
+                        title={format.vcodec}
+                        style={{
+                          maxWidth: 60,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap'
+                        }}
+                      >
+                        {format.vcodec.split('.')[0]}
+                      </span>
+                    )}
+                  </div>
                 </div>
-              </div>
-            </label>
-          ))}
+              </label>
+            ))
+          ) : (
+            <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
+              未检测到可选分辨率，将使用默认最佳质量下载。
+            </div>
+          )}
         </div>
 
         <div className="modal-actions">

@@ -10,6 +10,7 @@ declare global {
       getCookie: () => Promise<string>
       setCookie: (val: string) => Promise<void>
       selectFolder: () => Promise<string | null>
+      showItemInFolder: (filePath: string) => Promise<boolean>
       openLoginWindow: () => Promise<string | null>
 
       // 解析

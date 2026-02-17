@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, JSX } from 'react'
 import {
   Download,
   FolderOpen,
+  FileSearch,
   Music2,
   Link2,
   Terminal,
@@ -54,7 +55,6 @@ function App(): JSX.Element {
   const [tasks, setTasks] = useState<DownloadTask[]>([])
 
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
-  const [taskToDelete, setTaskToDelete] = useState<DownloadTask | null>(null)
 
   const [globalLogs, setGlobalLogs] = useState<string[]>([])
   const logEndRef = useRef<HTMLDivElement>(null)
@@ -252,8 +252,10 @@ function App(): JSX.Element {
   const handleConfirmDownload = (formatId: string | null) => {
     setIsModalOpen(false)
 
-    const selectedFormat = videoData?.formats.find((f: any) => f.format_id === formatId)
-    if (!selectedFormat) {
+    const selectedFormat = formatId
+      ? videoData?.formats.find((f: any) => f.format_id === formatId)
+      : null
+    if (formatId && !selectedFormat) {
       return showToastMsg('未选择格式或格式无效', 'error')
     }
 
@@ -267,7 +269,7 @@ function App(): JSX.Element {
       formatId,
       isAudioOnly: mode === 'audio',
       savePath,
-      ext: selectedFormat.ext,
+      ext: selectedFormat?.ext || (mode === 'audio' ? 'mp3' : 'mp4'),
       log: '等待调度...',
       files: [] // ✅ 新增
     }
@@ -357,6 +359,23 @@ function App(): JSX.Element {
   const handleSelectFolder = async () => {
     const path = await window.electron.selectFolder()
     if (path) setSavePath(path)
+  }
+
+  const getTaskPrimaryFilePath = (task: DownloadTask): string => {
+    if (Array.isArray(task.files) && task.files.length > 0) {
+      const preferred = task.files.find((p) => {
+        const lower = p.toLowerCase()
+        return !lower.endsWith('.part') && !lower.endsWith('.ytdl') && !lower.endsWith('.temp')
+      })
+      return preferred || task.files[0]
+    }
+    return task.savePath
+  }
+
+  const handleRevealFile = async (task: DownloadTask) => {
+    const target = getTaskPrimaryFilePath(task)
+    const ok = await window.electron.showItemInFolder(target)
+    if (!ok) showToastMsg('无法定位文件，请确认文件是否存在', 'error')
   }
 
   const visibleTasks = tasks
@@ -614,7 +633,21 @@ function App(): JSX.Element {
                 </div>
               </div>
 
-              <div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {task.status === 'completed' && (
+                  <button
+                    onClick={() => handleRevealFile(task)}
+                    className="icon-btn"
+                    style={{
+                      backgroundColor: 'transparent',
+                      border: '1px solid var(--border)',
+                      padding: '8px'
+                    }}
+                    title="查看文件"
+                  >
+                    <FileSearch size={18} color="var(--text-sub)" />
+                  </button>
+                )}
                 {task.status === 'downloading' || task.status === 'queued' ? (
                   <button
                     onClick={() => handleCancelTask(task.id)}
