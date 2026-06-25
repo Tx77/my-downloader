@@ -28,6 +28,8 @@
   flex-direction: column;
   animation: scaleUp 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
   border: 1px solid var(--border); /* 增加细微边框 */
+  max-height: 92vh;
+  overflow-y: auto;
 }
 
 /* --- 头部 --- */
@@ -118,7 +120,7 @@
 }
 
 .format-list {
-  max-height: 240px;
+  max-height: 190px;
   overflow-y: auto;
   background-color: var(--bg-dark);
   border: 1px solid var(--border);
@@ -202,6 +204,102 @@ input[type='radio']:checked::after {
   color: var(--text-sub);
   display: flex;
   gap: 10px;
+}
+
+.subtitle-panel {
+  background-color: var(--bg-dark);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 20px;
+}
+
+.subtitle-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-main);
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.subtitle-mode-row,
+.subtitle-check-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.subtitle-mode,
+.subtitle-check-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-sub);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.subtitle-mode {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #191919;
+}
+
+.subtitle-mode.selected {
+  color: var(--primary);
+  border-color: var(--primary);
+  background: var(--primary-20);
+}
+
+.subtitle-mode.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.subtitle-options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.subtitle-check-row input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+}
+
+.subtitle-lang-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 90px;
+  overflow-y: auto;
+}
+
+.subtitle-lang {
+  border: 1px solid var(--border);
+  background: #191919;
+  color: var(--text-sub);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.subtitle-lang.selected {
+  color: #000;
+  border-color: var(--primary);
+  background: var(--primary);
+}
+
+.subtitle-empty {
+  color: var(--text-sub);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 /* --- 底部按钮 --- */

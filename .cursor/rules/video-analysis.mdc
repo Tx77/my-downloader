@@ -1,0 +1,79 @@
+---
+description: Video content analysis — ASR transcription with Vulkan GPU, pipeline orchestration, and UI for Downloader Pro Electron app.
+globs: src/**/*.ts, src/**/*.tsx, src/**/*.css
+alwaysApply: false
+---
+
+# Video Analysis Feature — Cursor Rules
+
+## Context
+
+Downloader Pro Electron app. Video analysis extracts text from videos (B站/YouTube) using whisper.cpp ASR with **Vulkan GPU acceleration** (AMD 7900XTX confirmed working).
+
+## Current State (Phase 1 ✅)
+
+### Modules in `src/main/modules/`
+- **audio-extractor.ts** — `extractAudio(videoPath, outputPath, { processSet })` → 16kHz WAV
+- **transcriber.ts** — `transcribe(audioPath, { model, language, processSet })` → segments + fullText
+  - Uses whisper-cli.exe (Vulkan) with `-t 16` CPU threads as fallback
+  - GPU auto-detected via ggml-vulkan.dll
+- **analysis-pipeline.ts** — `setupAnalysisHandlers(mainWindow)` orchestrates full pipeline
+  - Strategy: subtitle-first (try external subs → fallback to ASR)
+  - Process tracking: `Set<ChildProcess>` per task, mapped via `activeTasks`
+  - Cancel: `killAllProcesses(id)` kills yt-dlp + ffmpeg + whisper-cli
+
+### IPC Channels
+```
+start-analysis     → handle (calls runPipeline)
+cancel-analysis    → handle (killAllProcesses)
+check-analysis-deps → handle (whisper binary + model availability)
+analysis-progress  → push  { id, stage, percent, overallPercent, message }
+analysis-complete  → push  AnalysisResult
+analysis-error     → push  { id, error }
+```
+
+### UI: VideoAnalysisPanel
+- URL input, strategy/model/language selectors
+- Progress bar (5 stages: fetching-info/downloading/extracting-audio/transcribing/done)
+- Transcript viewer with time-anchored segments
+
+## Mandatory Patterns
+
+### Every child process MUST be tracked for cancel
+```typescript
+const proc = spawn(binaryPath, args)
+processSet?.add(proc)                    // <-- REQUIRED
+proc.on('close', () => processSet?.delete(proc))
+proc.on('error', () => processSet?.delete(proc))
+```
+
+### Binary Path Resolution
+```typescript
+import { getBinaryPath } from './utils'
+getBinaryPath('whisper-cli')  // → resources/bin/whisper-cli.exe
+```
+
+### Model Path
+```typescript
+// models are in resources/bin/models/ggml-{model}.bin
+const basePath = app.isPackaged
+  ? join(process.resourcesPath, 'bin', 'models')
+  : join(app.getAppPath(), 'resources', 'bin', 'models')
+```
+
+## Dependencies on Disk
+```
+resources/bin/
+├── whisper-cli.exe        # Vulkan build, 479KB
+├── whisper-server.exe     # Vulkan build, 712KB
+├── ggml-vulkan.dll        # GPU backend, 71MB
+├── ggml-cpu.dll           # CPU fallback
+├── ggml-base.dll, ggml.dll, whisper.dll
+├── ffmpeg.exe, ffprobe.exe, yt-dlp.exe
+└── models/ggml-small.bin  # 466MB
+```
+
+## Planned (Phase 2)
+- whisper-server-manager.ts: keep model loaded in VRAM
+- content-analyzer.ts: LLM analysis (Claude/OpenAI/DeepSeek)
+- OCR hardcoded subtitle extraction (PaddleOCR)

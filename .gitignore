@@ -6,3 +6,7 @@ out
 *.log*
 resources/bin/*.exe
 resources/bin/*.zip
+resources/bin/*.dll
+resources/bin/models/
+resources/bin/backup-cpu/
+.env

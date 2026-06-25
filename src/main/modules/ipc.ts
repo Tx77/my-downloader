@@ -8,6 +8,36 @@ import { createCookieFile, cleanupCookieFile } from './cookie'
 
 const store = new Store()
 
+function extractSubtitleTracks(json: any) {
+  const tracks: Array<{ lang: string; name?: string; type: 'manual' | 'auto'; formats: string[] }> = []
+  const usableFormats = new Set(['srt', 'vtt', 'ass', 'ttml', 'srv3', 'srv2', 'json3'])
+
+  const addTracks = (source: any, type: 'manual' | 'auto') => {
+    if (!source || typeof source !== 'object') return
+    for (const [lang, items] of Object.entries(source)) {
+      const formats = Array.isArray(items)
+        ? Array.from(
+            new Set(
+              items
+                .map((item: any) => item?.ext)
+                .filter((ext) => ext && usableFormats.has(String(ext).toLowerCase()))
+            )
+          )
+        : []
+      if (!formats.length) continue
+      tracks.push({ lang, type, formats })
+    }
+  }
+
+  addTracks(json.subtitles, 'manual')
+  addTracks(json.automatic_captions, 'auto')
+
+  return tracks.sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'manual' ? -1 : 1
+    return a.lang.localeCompare(b.lang)
+  })
+}
+
 // 🔍 暴力获取清晰度字符串
 const getQualityString = (f: any): string => {
   if (f.format_note && f.format_note !== 'tiny' && f.format_note !== 'undefined') {
@@ -73,6 +103,12 @@ export function setupIpcHandlers(_mainWindow: BrowserWindow) {
       return filePaths[0]
     }
     return null
+  })
+
+  // 分析专用 — 不污染 downloadPath（修复 article 目录嵌套 bug）
+  ipcMain.handle('select-analysis-folder', async () => {
+    const { filePaths } = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+    return filePaths[0] || null
   })
 
   // --- 登录窗口 (B站专用) ---
@@ -269,7 +305,8 @@ export function setupIpcHandlers(_mainWindow: BrowserWindow) {
               title: json.title,
               thumbnail: json.thumbnail,
               duration: json.duration_string,
-              formats
+              formats,
+              subtitles: extractSubtitleTracks(json)
             })
           } catch (e) {
             console.error('JSON Parse Error:', e)

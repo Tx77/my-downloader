@@ -8,6 +8,8 @@ import { autoUpdater } from 'electron-updater'
 // 导入拆分后的业务模块
 import { setupIpcHandlers } from './modules/ipc'
 import { setupDownloadHandlers } from './modules/download'
+import { setupSubtitleParserHandlers } from './modules/subtitle-parser'
+import { setupAnalysisHandlers } from './modules/analysis-pipeline'
 
 // ==========================================
 // 🚨 全局 Polyfill (修复 crypto 兼容性)
@@ -61,11 +63,11 @@ function setupAutoUpdater(mainWindow: BrowserWindow) {
   })
 
   autoUpdater.on('update-downloaded', (_info) => {
-    // 下载完成后，通知前端，前端可以弹窗提示用户“重启安装”
+    // 下载完成后，通知前端，前端可以弹窗提示用户"重启安装"
     mainWindow.webContents.send('update-downloaded', _info)
   })
 
-  // 监听前端发来的“立即安装”指令
+  // 监听前端发来的"立即安装"指令
   ipcMain.on('install-update', () => {
     autoUpdater.quitAndInstall()
   })
@@ -77,17 +79,17 @@ function setupAutoUpdater(mainWindow: BrowserWindow) {
 function createWindow(): void {
   // 创建浏览器窗口
   const mainWindow = new BrowserWindow({
-    width: 1200, // 👈 调大宽度
-    height: 800, // 👈 调大高度
-    minWidth: 1000, // 设置最小宽度
+    width: 1200,
+    height: 800,
+    minWidth: 1000,
     minHeight: 600,
-    show: false, // 等待 ready-to-show 再显示，防止白屏
+    show: false,
     autoHideMenuBar: true,
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false, // 允许使用 Node.js API
-      contextIsolation: true // 推荐开启上下文隔离
+      sandbox: false,
+      contextIsolation: true
     }
   })
 
@@ -108,27 +110,26 @@ function createWindow(): void {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
-  // ✅ 初始化业务模块
-  setupIpcHandlers(mainWindow) // 通用 IPC (Cookie, 路径选择, URL解析)
-  setupDownloadHandlers(mainWindow) // 下载任务管理
-  setupAutoUpdater(mainWindow) // 自动更新
+  // 初始化业务模块
+  setupIpcHandlers(mainWindow)
+  setupDownloadHandlers(mainWindow)
+  setupSubtitleParserHandlers()
+  setupAnalysisHandlers(mainWindow)
+  setupAutoUpdater(mainWindow)
 }
 
 // ==========================================
 // 🚀 应用生命周期
 // ==========================================
 app.whenReady().then(() => {
-  // 设置 App ID (用于 Windows 通知等)
   electronApp.setAppUserModelId('com.electron.downloader')
 
-  // 默认优化：按 F12 打开开发者工具等快捷键
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
 
   createWindow()
 
-  // macOS: 点击 Dock 图标且无窗口时重新创建
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

@@ -9,6 +9,7 @@ import iconv from 'iconv-lite' // ⚠️ 必须引用
 const activeDownloads = new Map<string, ChildProcess>()
 const canceledIds = new Set<string>()
 const taskFiles = new Map<string, Set<string>>()
+const taskStartedAt = new Map<string, number>()
 // 记录任务状态，防止 UI 闪烁
 const lastProgress = new Map<string, { percent: number; totalSize: string }>()
 
@@ -31,10 +32,12 @@ function normalizePath(p: string) {
 
 function addTaskFile(id: string, p: string) {
   const real = normalizePath(p)
-  if (!real) return
+  if (!real) return null
   const set = taskFiles.get(id) ?? new Set<string>()
+  const existed = set.has(real)
   set.add(real)
   taskFiles.set(id, set)
+  return existed ? null : real
 }
 
 async function safeUnlink(p: string) {
@@ -59,6 +62,44 @@ async function cleanupTaskTempFiles(id: string) {
   return removed
 }
 
+function isSubtitleFile(p: string) {
+  return /\.(srt|vtt)$/i.test(p)
+}
+
+async function hasExistingSubtitleFile(id: string) {
+  const set = taskFiles.get(id)
+  if (!set) return false
+
+  for (const p of set) {
+    if (!isSubtitleFile(p)) continue
+    const st = await fs.stat(p).catch(() => null)
+    if (st?.isFile()) return true
+  }
+
+  return false
+}
+
+async function scanRecentSubtitleFiles(
+  id: string,
+  savePath: string,
+  recordFile: (id: string, p: string) => void
+) {
+  const startedAt = taskStartedAt.get(id) ?? Date.now()
+  const entries = await fs.readdir(savePath, { withFileTypes: true }).catch(() => [])
+
+  for (const entry of entries) {
+    if (!entry.isFile()) continue
+    if (!isSubtitleFile(entry.name)) continue
+
+    const p = join(savePath, entry.name)
+    const st = await fs.stat(p).catch(() => null)
+    if (!st?.isFile()) continue
+    if (st.mtimeMs + 5000 < startedAt) continue
+
+    recordFile(id, p)
+  }
+}
+
 function killTree(child: ChildProcess) {
   if (!child?.pid) return
   if (process.platform === 'win32') {
@@ -79,6 +120,11 @@ function stripAnsi(s: string) {
 }
 
 export function setupDownloadHandlers(mainWindow: BrowserWindow) {
+  const recordTaskFile = (id: string, p: string) => {
+    const real = addTaskFile(id, p)
+    if (real) mainWindow.webContents.send('download-file', { id, path: real })
+  }
+
   // 处理进度和日志的统一函数
   const handleProcessOutput = (id: string, rawChunk: Buffer, isErrorStream: boolean) => {
     // 1. 解码
@@ -94,17 +140,28 @@ export function setupDownloadHandlers(mainWindow: BrowserWindow) {
       // 捕获 .part 文件 或 目标文件
       // [download] Destination: D:\Downloads\video.mp4
       const destMatch = cleanLine.match(/\[download\]\s+Destination:\s+(.+)$/)
-      if (destMatch?.[1]) addTaskFile(id, destMatch[1])
+      if (destMatch?.[1]) recordTaskFile(id, destMatch[1])
 
       // [ffmpeg] Merging formats into "..."
       const mergeMatch = cleanLine.match(/Merging formats into\s+"(.+?)"/)
-      if (mergeMatch?.[1]) addTaskFile(id, mergeMatch[1])
+      if (mergeMatch?.[1]) recordTaskFile(id, mergeMatch[1])
+
+      const subtitleMatch = cleanLine.match(/Writing video (?:subtitles|automatic captions) to:\s+(.+)$/)
+      if (subtitleMatch?.[1]) recordTaskFile(id, subtitleMatch[1])
+
+      const printedFileMatch = cleanLine.match(/^([A-Za-z]:\\.+|\/.+)$/)
+      if (
+        printedFileMatch?.[1] &&
+        /\.(mp4|webm|mkv|m4a|mp3|opus|wav|flac|srt|vtt|ass|ttml)$/i.test(printedFileMatch[1])
+      ) {
+        recordTaskFile(id, printedFileMatch[1])
+      }
 
       // 简单路径匹配
       if (cleanLine.includes('.part') && (cleanLine.includes(':\\') || cleanLine.startsWith('/'))) {
         // 简单的提取逻辑，尝试提取出路径部分
         const pathMatch = cleanLine.match(/([A-Za-z]:\\[^\s"]+?\.part)|(\/[^\s"]+?\.part)/)
-        if (pathMatch) addTaskFile(id, pathMatch[0])
+        if (pathMatch) recordTaskFile(id, pathMatch[0])
       }
     }
 
@@ -158,7 +215,7 @@ export function setupDownloadHandlers(mainWindow: BrowserWindow) {
     return false
   })
 
-  ipcMain.on('start-download', (_event, { id, url, formatId, savePath, isAudioOnly, sessData }) => {
+  ipcMain.on('start-download', (_event, { id, url, formatId, savePath, isAudioOnly, sessData, subtitleOptions }) => {
     const ytDlpPath = getBinaryPath('yt-dlp')
     const ffmpegPath = getBinaryPath('ffmpeg')
 
@@ -166,6 +223,7 @@ export function setupDownloadHandlers(mainWindow: BrowserWindow) {
     const cookieFilePath = createCookieFile(sessData)
 
     // 重置进度
+    taskStartedAt.set(id, Date.now())
     lastProgress.set(id, { percent: 0, totalSize: '计算中...' })
 
     const args = [
@@ -179,8 +237,8 @@ export function setupDownloadHandlers(mainWindow: BrowserWindow) {
       // 关键参数：强制换行，利于正则解析
       '--newline',
       // 打印路径，利于捕获
-      // '--print',
-      // 'after_move:filepath',
+      '--print',
+      'after_move:filepath',
       '--progress',
       '--newline',
       '--user-agent',
@@ -190,7 +248,25 @@ export function setupDownloadHandlers(mainWindow: BrowserWindow) {
 
     if (cookieFilePath) args.push('--cookies', cookieFilePath)
 
-    if (isAudioOnly && formatId && formatId !== 'best') {
+    if (subtitleOptions?.mode && subtitleOptions.mode !== 'none') {
+      if (subtitleOptions.includeManual) args.push('--write-subs')
+      if (subtitleOptions.includeAuto) args.push('--write-auto-subs')
+
+      const languages = Array.isArray(subtitleOptions.languages)
+        ? subtitleOptions.languages.filter(Boolean)
+        : []
+      args.push('--sub-langs', languages.length ? languages.join(',') : 'all')
+
+      if (subtitleOptions.format === 'vtt') {
+        args.push('--sub-format', 'vtt/best')
+      } else {
+        args.push('--sub-format', 'vtt/srv3/best', '--convert-subs', 'srt')
+      }
+    }
+
+    if (subtitleOptions?.mode === 'subtitle-only') {
+      args.push('--skip-download')
+    } else if (isAudioOnly && formatId && formatId !== 'best') {
       args.push('-f', formatId)
     } else if (isAudioOnly) {
       args.push('-x', '--audio-format', 'mp3')
@@ -221,11 +297,32 @@ export function setupDownloadHandlers(mainWindow: BrowserWindow) {
       if (canceledIds.has(id)) {
         canceledIds.delete(id)
         const removed = await cleanupTaskTempFiles(id)
+        taskStartedAt.delete(id)
         mainWindow.webContents.send('download-canceled', { id, removed })
         return
       }
 
-      mainWindow.webContents.send('download-complete', { id, code })
+      let finalCode = code
+      let finalError = ''
+      if (subtitleOptions?.mode === 'subtitle-only') {
+        await scanRecentSubtitleFiles(id, savePath, recordTaskFile)
+        if (code === 0 && !(await hasExistingSubtitleFile(id))) {
+          finalCode = 1
+          const languages = Array.isArray(subtitleOptions.languages)
+            ? subtitleOptions.languages.filter(Boolean).join(', ')
+            : ''
+          finalError = languages
+            ? `未找到下载完成的字幕文件。可能是该视频没有这些语言的字幕：${languages}。`
+            : '未找到下载完成的字幕文件。可能是该视频没有可下载字幕。'
+          mainWindow.webContents.send('download-error', {
+            id,
+            error: finalError
+          })
+        }
+      }
+
+      taskStartedAt.delete(id)
+      mainWindow.webContents.send('download-complete', { id, code: finalCode, error: finalError })
     })
   })
 }

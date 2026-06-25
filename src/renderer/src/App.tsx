@@ -12,15 +12,20 @@ import {
   Clock,
   X,
   Trash2,
-  Film
+  Film,
+  Captions,
+  Users,
+  Copy,
+  CheckSquare
 } from 'lucide-react'
 import './assets/base.css'
 import './assets/App.css'
 import { Toast } from './components/Toast'
 import { CustomSelect } from './components/CustomSelect'
-import { ConfirmModal } from './components/ConfirmModal'
+import { ConfirmModal, type SubtitleOptions } from './components/ConfirmModal'
 import { ConfirmDeleteModal } from './components/ConfirmDeleteModal'
 import { CookieManager } from './components/CookieManager'
+import { VideoAnalysisPanel } from './components/VideoAnalysisPanel'
 
 interface DownloadTask {
   id: string
@@ -37,6 +42,17 @@ interface DownloadTask {
 
   // ✅ 新增：记录真实落盘路径（含 .part / 合并后的 mp4 / 中间文件）
   files: string[]
+  subtitleOptions?: SubtitleOptions
+}
+
+interface SubtitleSegment {
+  id: string
+  index: number
+  startTime: number
+  endTime: number
+  text: string
+  speaker?: string
+  speakerSource?: 'detected' | 'manual' | 'ai' | 'unknown'
 }
 
 function App(): JSX.Element {
@@ -50,7 +66,7 @@ function App(): JSX.Element {
   const [videoData, setVideoData] = useState<any>(null)
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [toast, setToast] = useState({ show: false, message: '', type: 'success' })
-  const [tab, setTab] = useState<'all' | 'active' | 'completed'>('all')
+  const [tab, setTab] = useState<'all' | 'active' | 'completed' | 'interview' | 'analysis'>('all')
 
   const [tasks, setTasks] = useState<DownloadTask[]>([])
 
@@ -63,6 +79,11 @@ function App(): JSX.Element {
 
   const [deleteTargets, setDeleteTargets] = useState<DownloadTask[]>([])
   const [deleteMode, setDeleteMode] = useState<'single' | 'bulk'>('single')
+  const [interviewTask, setInterviewTask] = useState<DownloadTask | null>(null)
+  const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([])
+  const [selectedSpeaker, setSelectedSpeaker] = useState('all')
+  const [manualSpeaker, setManualSpeaker] = useState('嘉宾')
+  const [isParsingSubtitle, setIsParsingSubtitle] = useState(false)
 
   useEffect(() => {
     const init = async () => {
@@ -94,8 +115,9 @@ function App(): JSX.Element {
       setTasks((prev) =>
         prev.map((t) => {
           if (t.id !== id) return t
-          if (t.files.includes(path)) return t
-          return { ...t, files: [...t.files, path] }
+          const files = Array.isArray(t.files) ? t.files : []
+          if (files.includes(path)) return t
+          return { ...t, files: [...files, path] }
         })
       )
     })
@@ -124,7 +146,7 @@ function App(): JSX.Element {
 
     // 完成：已取消的不再覆盖
     // @ts-ignore
-    window.electron.onComplete(({ id, code }) => {
+    window.electron.onComplete(({ id, code, error }) => {
       setTasks((prev) =>
         prev.map((t) => {
           if (t.id === id) {
@@ -143,7 +165,7 @@ function App(): JSX.Element {
               status: ok ? 'completed' : 'error',
               percent: ok ? 100 : t.percent,
               totalSize: finalSize, // 使用修正后的大小
-              log: ok ? '下载成功' : '下载失败'
+              log: ok ? '下载成功' : error ? `❌ 错误: ${error}` : t.log.startsWith('❌') ? t.log : '下载失败'
             }
           }
           return t
@@ -223,7 +245,8 @@ function App(): JSX.Element {
       task.savePath,
       task.isAudioOnly,
       sessData,
-      task.id
+      task.id,
+      task.subtitleOptions
     )
   }
 
@@ -249,7 +272,13 @@ function App(): JSX.Element {
     }
   }
 
-  const handleConfirmDownload = (formatId: string | null) => {
+  const handleConfirmDownload = ({
+    formatId,
+    subtitleOptions
+  }: {
+    formatId: string | null
+    subtitleOptions: SubtitleOptions
+  }) => {
     setIsModalOpen(false)
 
     const selectedFormat = formatId
@@ -269,9 +298,13 @@ function App(): JSX.Element {
       formatId,
       isAudioOnly: mode === 'audio',
       savePath,
-      ext: selectedFormat?.ext || (mode === 'audio' ? 'mp3' : 'mp4'),
+      ext:
+        subtitleOptions.mode === 'subtitle-only'
+          ? subtitleOptions.format
+          : selectedFormat?.ext || (mode === 'audio' ? 'mp3' : 'mp4'),
       log: '等待调度...',
-      files: [] // ✅ 新增
+      files: [], // ✅ 新增
+      subtitleOptions
     }
 
     setTasks((prev) => [...prev, newTask])
@@ -378,11 +411,98 @@ function App(): JSX.Element {
     if (!ok) showToastMsg('无法定位文件，请确认文件是否存在', 'error')
   }
 
+  const formatSubtitleTime = (seconds: number) => {
+    const total = Math.max(0, Math.floor(seconds))
+    const h = Math.floor(total / 3600)
+    const m = Math.floor((total % 3600) / 60)
+    const s = total % 60
+    return h > 0
+      ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+      : `${m}:${String(s).padStart(2, '0')}`
+  }
+
+  const getSubtitleFiles = (task: DownloadTask) => {
+    const files = Array.isArray(task.files) ? task.files : []
+    return files.filter((file) => /\.(srt|vtt)$/i.test(file))
+  }
+
+  const handleOpenInterview = async (task: DownloadTask) => {
+    const subtitleFile = getSubtitleFiles(task)[0]
+    if (!subtitleFile) {
+      showToastMsg('这个任务还没有记录到字幕文件', 'error')
+      return
+    }
+
+    setIsParsingSubtitle(true)
+    try {
+      const segments = await window.electron.parseSubtitleFile(subtitleFile)
+      setInterviewTask(task)
+      setSubtitleSegments(segments)
+      setSelectedSpeaker('all')
+      setTab('interview')
+      showToastMsg(`已解析 ${segments.length} 条字幕`)
+    } catch (e: any) {
+      showToastMsg(`字幕解析失败: ${String(e)}`, 'error')
+    } finally {
+      setIsParsingSubtitle(false)
+    }
+  }
+
+  const applySpeakerToUnknown = () => {
+    const speaker = manualSpeaker.trim()
+    if (!speaker) return
+    setSubtitleSegments((prev) =>
+      prev.map((segment) =>
+        segment.speaker
+          ? segment
+          : {
+              ...segment,
+              speaker,
+              speakerSource: 'manual'
+            }
+      )
+    )
+  }
+
+  const updateSegmentSpeaker = (id: string, speakerName: string) => {
+    const speaker = speakerName.trim()
+    setSubtitleSegments((prev) =>
+      prev.map((segment) =>
+        segment.id === id
+          ? {
+              ...segment,
+              speaker: speaker || undefined,
+              speakerSource: speaker ? 'manual' : 'unknown'
+            }
+          : segment
+      )
+    )
+  }
+
+  const copyInterviewText = async () => {
+    const targetSegments =
+      selectedSpeaker === 'all'
+        ? subtitleSegments
+        : subtitleSegments.filter((segment) => (segment.speaker || '未标注') === selectedSpeaker)
+
+    const text = targetSegments
+      .map((segment) => {
+        const speaker = segment.speaker ? `【${segment.speaker}】` : '【未标注】'
+        return `${formatSubtitleTime(segment.startTime)} ${speaker} ${segment.text}`
+      })
+      .join('\n')
+
+    await navigator.clipboard.writeText(text)
+    showToastMsg('已复制访谈文本')
+  }
+
   const visibleTasks = tasks
     .filter((t) => {
       if (tab === 'active') return t.status === 'downloading' || t.status === 'queued'
       if (tab === 'completed')
         return t.status === 'completed' || t.status === 'canceled' || t.status === 'error'
+      if (tab === 'interview') return false
+      if (tab === 'analysis') return false
       return true
     })
 
@@ -390,6 +510,15 @@ function App(): JSX.Element {
       const statusOrder: any = { downloading: 1, queued: 2, error: 3, canceled: 4, completed: 5 }
       return (statusOrder[a.status] || 9) - (statusOrder[b.status] || 9)
     })
+
+  const speakerNames = Array.from(
+    new Set(subtitleSegments.map((segment) => segment.speaker || '未标注'))
+  )
+
+  const visibleSubtitleSegments =
+    selectedSpeaker === 'all'
+      ? subtitleSegments
+      : subtitleSegments.filter((segment) => (segment.speaker || '未标注') === selectedSpeaker)
 
   function getStatusText(status: string) {
     switch (status) {
@@ -555,6 +684,18 @@ function App(): JSX.Element {
           >
             历史 ({tasks.filter((t) => t.status !== 'downloading' && t.status !== 'queued').length})
           </button>
+          <button
+            className={`tab-btn ${tab === 'interview' ? 'active' : ''}`}
+            onClick={() => setTab('interview')}
+          >
+            访谈整理 ({subtitleSegments.length})
+          </button>
+          <button
+            className={`tab-btn ${tab === 'analysis' ? 'active' : ''}`}
+            onClick={() => setTab('analysis')}
+          >
+            📊 视频分析
+          </button>
 
           <button
             className="tab-btn"
@@ -571,7 +712,94 @@ function App(): JSX.Element {
         </div>
 
         <div className="download-list">
-          {visibleTasks.length === 0 && (
+          {tab === 'analysis' && (
+            <VideoAnalysisPanel
+              savePath={savePath}
+              sessData={sessData}
+              onLog={(msg) => setGlobalLogs((prev) => [...prev, msg].slice(-50))}
+            />
+          )}
+
+          {tab === 'interview' && (
+            <div className="interview-panel">
+              <div className="interview-toolbar">
+                <div>
+                  <div className="interview-title">
+                    <Users size={18} />
+                    <span>{interviewTask?.title || '访谈整理'}</span>
+                  </div>
+                  <div className="interview-subtitle">
+                    {subtitleSegments.length
+                      ? `${subtitleSegments.length} 条字幕，${speakerNames.length} 个发言人`
+                      : '从已完成任务的字幕按钮进入整理。'}
+                  </div>
+                </div>
+
+                <button
+                  className="icon-btn"
+                  onClick={copyInterviewText}
+                  disabled={subtitleSegments.length === 0}
+                  title="复制当前筛选结果"
+                >
+                  <Copy size={16} /> 复制
+                </button>
+              </div>
+
+              {subtitleSegments.length > 0 && (
+                <>
+                  <div className="interview-controls">
+                    <div className="speaker-filter">
+                      <button
+                        className={`speaker-chip ${selectedSpeaker === 'all' ? 'active' : ''}`}
+                        onClick={() => setSelectedSpeaker('all')}
+                      >
+                        全部
+                      </button>
+                      {speakerNames.map((speaker) => (
+                        <button
+                          key={speaker}
+                          className={`speaker-chip ${selectedSpeaker === speaker ? 'active' : ''}`}
+                          onClick={() => setSelectedSpeaker(speaker)}
+                        >
+                          {speaker}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="speaker-assign">
+                      <input
+                        className="speaker-input"
+                        value={manualSpeaker}
+                        onChange={(e) => setManualSpeaker(e.target.value)}
+                      />
+                      <button className="icon-btn" onClick={applySpeakerToUnknown}>
+                        <CheckSquare size={16} /> 未标注设为此人
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="subtitle-segment-list">
+                    {visibleSubtitleSegments.map((segment) => (
+                      <div key={segment.id} className="subtitle-segment">
+                        <div className="segment-time">
+                          {formatSubtitleTime(segment.startTime)} - {formatSubtitleTime(segment.endTime)}
+                        </div>
+                        <input
+                          className="segment-speaker-input"
+                          value={segment.speaker || ''}
+                          placeholder="未标注"
+                          onChange={(e) => updateSegmentSpeaker(segment.id, e.target.value)}
+                        />
+                        <div className="segment-text">{segment.text}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {tab !== 'interview' && tab !== 'analysis' && visibleTasks.length === 0 && (
             <div style={{ textAlign: 'center', marginTop: '100px', color: '#555' }}>
               <div style={{ fontSize: '40px', marginBottom: '10px' }}>📭</div>
               {tab === 'all' && '没有任务，快去解析一个链接吧！'}
@@ -580,7 +808,7 @@ function App(): JSX.Element {
             </div>
           )}
 
-          {visibleTasks.map((task) => (
+          {tab !== 'interview' && tab !== 'analysis' && visibleTasks.map((task) => (
             <div key={task.id} className="download-item">
               <div className="item-icon" style={{ backgroundColor: getStatusColor(task.status) }}>
                 {task.isAudioOnly ? (
@@ -634,6 +862,21 @@ function App(): JSX.Element {
               </div>
 
               <div style={{ display: 'flex', gap: 8 }}>
+                {task.status === 'completed' && getSubtitleFiles(task).length > 0 && (
+                  <button
+                    onClick={() => handleOpenInterview(task)}
+                    className="icon-btn"
+                    disabled={isParsingSubtitle}
+                    style={{
+                      backgroundColor: 'transparent',
+                      border: '1px solid var(--border)',
+                      padding: '8px'
+                    }}
+                    title="整理字幕"
+                  >
+                    <Captions size={18} color="var(--text-sub)" />
+                  </button>
+                )}
                 {task.status === 'completed' && (
                   <button
                     onClick={() => handleRevealFile(task)}

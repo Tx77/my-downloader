@@ -1,0 +1,147 @@
+/* Card wrapper (legacy) */
+.analysis-result-card {
+  background: #080808;
+  border: 1px solid #1a1a1a;
+  border-radius: 8px;
+}
+
+.ai-card-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid #1a1a1a;
+  background: #0d0d0d;
+}
+
+.ai-card-tabs button {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #777;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 10px 14px;
+}
+
+.ai-card-tabs button:hover {
+  color: #aaa;
+}
+
+.ai-card-tabs button.active {
+  color: #1db954;
+  border-bottom-color: #1db954;
+}
+
+/* Card body — no nested scroll (scroll is on the parent container) */
+.ai-card-body {
+  padding: 14px;
+}
+
+/* ── Content styles (used by both card and standalone renderers) ── */
+
+.summary-text {
+  color: #c8c8c8;
+  font-size: 13px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+}
+
+.key-point-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.key-point-row {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.key-point-time {
+  background: #102014;
+  border: 1px solid #1d4a2a;
+  border-radius: 6px;
+  color: #1db954;
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 11px;
+  padding: 5px 6px;
+  width: 64px;
+}
+
+.key-point-time:hover {
+  background: #143018;
+}
+
+.key-point-content {
+  min-width: 0;
+}
+
+.key-point-title {
+  color: #f0f0f0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.importance {
+  color: #777;
+  font-size: 10px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.key-point-description {
+  color: #999;
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 3px;
+}
+
+.mind-map-tree {
+  color: #c8c8c8;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.mind-map-node {
+  margin: 2px 0;
+}
+
+.mind-map-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+}
+
+.tree-toggle {
+  align-items: center;
+  background: transparent;
+  border: none;
+  color: #1db954;
+  cursor: pointer;
+  display: flex;
+  height: 20px;
+  justify-content: center;
+  padding: 0;
+  width: 20px;
+}
+
+.tree-spacer {
+  display: inline-block;
+  width: 20px;
+}
+
+.mind-map-children {
+  border-left: 1px solid #222;
+  margin-left: 10px;
+  padding-left: 12px;
+}

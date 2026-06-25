@@ -282,3 +282,141 @@
   background: var(--primary);
   transition: width 0.4s ease-out;
 }
+
+.interview-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 100%;
+}
+
+.interview-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.interview-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-main);
+  font-size: 16px;
+  font-weight: 700;
+  max-width: 720px;
+}
+
+.interview-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.interview-subtitle {
+  color: var(--text-sub);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.interview-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px;
+}
+
+.speaker-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.speaker-chip {
+  border: 1px solid var(--border);
+  background: #191919;
+  color: var(--text-sub);
+  border-radius: 999px;
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.speaker-chip.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #000;
+  font-weight: 700;
+}
+
+.speaker-assign {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.speaker-input,
+.segment-speaker-input {
+  background: #191919;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-main);
+  outline: none;
+}
+
+.speaker-input {
+  width: 180px;
+  padding: 10px 12px;
+}
+
+.speaker-input:focus,
+.segment-speaker-input:focus {
+  border-color: var(--primary);
+}
+
+.subtitle-segment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 20px;
+}
+
+.subtitle-segment {
+  display: grid;
+  grid-template-columns: 120px 120px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.segment-time {
+  color: var(--text-sub);
+  font-size: 12px;
+  line-height: 32px;
+  white-space: nowrap;
+}
+
+.segment-speaker-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.segment-text {
+  color: var(--text-main);
+  font-size: 14px;
+  line-height: 1.6;
+  user-select: text;
+  word-break: break-word;
+}
