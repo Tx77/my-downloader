@@ -44,11 +44,11 @@ type LLMProvider = 'deepseek' | 'openai' | 'codex-cli'
   - Rhetoric & wording analysis (3-5 representative quotes with function analysis)
   - Fact vs opinion split table (verifiable fact / author judgment / unverified claim / emotional expression / ad)
 - **Ad filtering**: Sponsor/merchandise/promotional content identified and excluded
-- `max_tokens` = 4096 per chunk call
+- `max_tokens` = 8192 per chunk call
 
 **Stage 2 — Article Synthesis**
 - All notes merged → single LLM call to write full article
-- `max_tokens` = 8192 (larger to avoid truncation)
+- `max_tokens` = 16384 (generous headroom for long-form analysis)
 - Article structure (9 sections):
   1. 一句话结论 (bottom-line takeaway)
   2. 内容概览 (what it's about, ≥200 chars)

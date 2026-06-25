@@ -113,7 +113,7 @@ async function callLLM(
   systemPrompt: string,
   userPrompt: string,
   options: AnalyzerOptions = {},
-  maxTokens = 4096
+  maxTokens = 8192
 ): Promise<string> {
   const provider = options.provider || 'deepseek'
   if (provider === 'codex-cli') {
@@ -219,8 +219,9 @@ export async function generateSummary(text: string, options: AnalyzerOptions = {
   const chunks = chunkText(text)
 
   const systemPrompt = [
-    'You are a professional video content analyst.',
-    'Write in Chinese unless the transcript is mostly another language.',
+    'You are a professional content analyst.',
+    'The input transcript may be in any language (Chinese, English, Japanese, etc).',
+    'Output in Chinese unless the transcript is mostly another language — then output in that language.',
     'Return concise, factual Markdown. Preserve important names, claims, numbers, and conclusions.'
   ].join('\n')
 
@@ -250,8 +251,9 @@ export async function extractKeyPoints(segments: TranscriptSegment[], options: A
   const allPoints: KeyPoint[] = []
 
   const systemPrompt = [
-    'Extract key points from a video transcript with timestamps.',
+    'Extract key points from a transcript with timestamps. Input may be in any language.',
     'Return only a JSON array: [{"title":"...", "description":"...", "timestamp": seconds, "importance": 1-5}].',
+    'Title and description should be in the same language as the majority of the transcript.',
     'Use timestamps that appear in the transcript. Keep 5-10 strong points total when possible.'
   ].join('\n')
 
@@ -273,9 +275,9 @@ export async function generateMindMap(text: string, options: AnalyzerOptions = {
   const chunks = chunkText(text)
 
   const systemPrompt = [
-    'Turn the video transcript into a mind-map tree.',
+    'Turn the transcript into a mind-map tree. Input may be in any language.',
     'Return only JSON: {"topic":"...", "children":[{"topic":"...", "children":[]}]}',
-    'Use Chinese by default. Keep depth <= 3, node topics short, and include 3-6 top-level branches.'
+    'Node topics should be in the same language as the transcript. Keep depth <= 3, node topics short, and include 3-6 top-level branches.'
   ].join('\n')
 
   const partialMaps: MindMapNode[] = []
@@ -333,7 +335,8 @@ export async function generateAnalysisArticle(
 
   // ── Note extraction (per chunk) ──
   const noteSystemPrompt = [
-    '你是一位资深深度阅读分析师。你的任务是为一篇深度分析文章从原始文本中提取结构化素材。',
+    '你是一位资深深度阅读分析师。你的任务是从原始文本中为一篇深度分析文章提取结构化素材。',
+    '输入可能是中文、英文、日文或任何语言；你的分析和笔记输出必须使用中文。',
     '',
     '核心原则：',
     '- 只基于原文，不编造任何外部信息。原文中没有的内容坚决不写。',
@@ -341,7 +344,7 @@ export async function generateAnalysisArticle(
     '- 凡属于第③类（广告），直接忽略，不提取任何素材。',
     '',
     '素材提取规则：',
-    '- 保留具体数字、机构名、人名、地名、年份、金额、比率——这些是文章的说服力来源。',
+    '- 保留具体数字、机构名、人名、地名、年份、金额、比率——这些是文章的说服力来源。引用原文中的数值时保留原始语言和单位。',
     '- 对每个主张标注可信度标记：',
     '  [FC] 可验证的事实陈述（Factual Claim）',
     '  [OP] 作者的纯观点/判断（Opinion）',
@@ -349,9 +352,9 @@ export async function generateAnalysisArticle(
     '  [RT] 修辞手法/情绪表达（Rhetorical Technique）',
     '- 如果作者引用了第三方数据但没有给出来源，标注为”[FC-未给来源]”。',
     '- 如果有因果链条，用”→”写清：背景 → 机制 → 后果 → 作者结论。',
-    '- 保留值得引用的原文片段（50字以内），标记其修辞功能。',
+    '- 保留值得引用的原文片段（50词/字以内），标记其修辞功能。引用时保留原始语言，但在括号中附中文翻译。',
     '- 识别文本的语气和表达策略（科普/讽刺/煽情/数据轰炸/诉诸权威/类比/偷换概念等）。',
-    '- 写中文。'
+    '- 分析笔记全部用中文输出。'
   ].join('\n')
 
   const noteUserPrompt = [
@@ -390,11 +393,12 @@ export async function generateAnalysisArticle(
   }
 
   // ── Final article generation ──
-  const ARTICLE_MAX_TOKENS = 8192
+  const ARTICLE_MAX_TOKENS = 16384
 
   const finalSystemPrompt = [
-    '你是一位资深中文编辑和深度内容分析师。',
-    '你的任务是基于文本分析笔记，写一篇**深度分析文章**（不是短摘要，不是 JSON）。',
+    '你是一位资深编辑和深度内容分析师。',
+    '你的任务是基于分析笔记写一篇**深度分析文章**（不是短摘要，不是 JSON）。',
+    '输入笔记可能是从任何语言的原文中提取的；你的文章输出必须使用中文。',
     '',
     '写作要求：',
     '- 不要暴露技术细节（不提 chunk/notes/LLM/prompt/模型）。',
@@ -402,7 +406,7 @@ export async function generateAnalysisArticle(
     '- 对笔记中标记了 [FC-未给来源] 的内容，必须写明”原文引用了此数据但未给出可核查来源”。',
     '- 对笔记中标记了 [OP] 的内容，用”作者认为/作者声称/作者判断”来表述。',
     '- 正文建议 1800–2500 中文字（素材支持的话），每个章节都要有实质内容。',
-    '- 引用原文的具体数字、人名、案例来支撑分析。',
+    '- 引用原文的具体数字、人名、案例来支撑分析。引用非中文原文时给出中文翻译，必要时保留原文措辞。',
     '- 分析”论证链条”而非”时间线”：前提 → 证据 → 推理 → 结论 → 隐含意义。',
     '- 如果是叙事型内容（讲故事而非论证），分析其叙事策略而非强行套论证框架。',
     '- 使用清晰的中文 Markdown。'
@@ -411,7 +415,8 @@ export async function generateAnalysisArticle(
   const finalUserPrompt = [
     `标题：${title}`,
     '',
-    '请写一篇深度内容分析文章，严格按以下结构（每个章节都必须有充分内容，不要只写一两行）：',
+    '请写一篇深度内容分析文章。原文可能是中文、英文或其他语言——素材笔记中引用的原文片段可能混有多种语言。你的文章输出必须全部用中文。',
+    '严格按以下结构（每个章节都必须有充分内容，不要只写一两行）：',
     '',
     '# {标题}｜深度分析',
     '',
@@ -473,7 +478,7 @@ export async function generateAnalysisArticle(
     '- 阶段 1：每个切块先让 LLM 做”结构化素材提取”（含 [FC]/[OP]/[SP]/[RT] 可信度标记 + 事实观点拆分 + 修辞分析 + 广告过滤）。',
     '- 阶段 2：合并所有笔记，让 LLM 写成深度分析文章（含可信度评分）。',
     '- 若转录带时间戳，输入格式为 `[mm:ss] 文本`；已有纯文本分析会按段落生成粗略时间戳。',
-    '- 文章生成阶段 max_tokens 设为 8192（比通用调用的 4096 更大，确保长文不被截断）。',
+    '- 文章生成阶段 max_tokens 设为 16384（比通用调用的 8192 更大，确保长文不被截断）。',
     '',
     '## 广告/赞助过滤规则',
     '',

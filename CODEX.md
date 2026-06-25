@@ -67,7 +67,7 @@ Files in article folder:
 **LLM Analysis:**
 - Providers: `deepseek` (default), `openai` (OpenAI-compatible), `codex-cli` (local subprocess)
 - Two-stage: chunk notes extraction → full article synthesis
-- `max_tokens`: 4096 for notes, **8192 for article**
+- `max_tokens`: 8192 for notes, **16384 for article**
 - Notes stage: [FC]/[OP]/[SP]/[RT] inline fact/opinion tagging + ad filtering
 - Article: 9 sections — conclusion, overview, argument flow, facts table, fact/opinion split, rhetoric, credibility score (5-dim), follow-up questions, speed-read
 - Ad/sponsor content filtered at note extraction stage
