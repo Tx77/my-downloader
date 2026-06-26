@@ -26,11 +26,138 @@ export interface WhisperSegment {
   text: string
 }
 
+export interface TranscriptParagraph {
+  startMs: number       // 段落起始毫秒
+  endMs: number         // 段落结束毫秒
+  text: string           // 段内 segments 拼接后的文本 (无时间戳前缀)
+}
+
+export interface TranscriptTranslation {
+  targetLanguage: string
+  paragraphs: string[]   // 与 paragraph[] 一一对应
+  processingTimeMs: number
+  error?: string
+}
+
 export interface TranscriberResult {
   fullText: string
   segments: WhisperSegment[]
   language: string
   processingTime: number
+  paragraphs?: TranscriptParagraph[]
+  translation?: TranscriptTranslation
+}
+
+// ===== 转录文本格式化 =====
+
+export interface FormatTranscriptOptions {
+  /**
+   * 相邻 segment 间隔超过此值(秒)视为段落边界。
+   * 默认 2.0s — 说话中的自然停顿。
+   * 对于字幕来源(无真实停顿间隔), 可设为 Infinity 以禁用段落分割。
+   */
+  paragraphGapSec?: number
+  /** 是否在段落开头插入时间戳, 默认 true */
+  timestamps?: boolean
+  /**
+   * 句末标点触发段落边界的最小句子数。
+   * 当 segment gap 不足以分段时（字幕常见），每积累 N 个句子后遇句末标点就分段。
+   * 默认 2 — 大约 2-3 句话一个段落。
+   */
+  sentencesPerParagraph?: number
+}
+
+/** 段落内至少要有这么多句末标点才允许句末分段（防开头就断） */
+const MIN_SENTENCE_BREAK_COUNT = 1
+
+const SENTENCE_END_RE = /[。！？.!?]$/
+
+/**
+ * 将 segments 按时间间隔 + 句末标点分组为段落数组。
+ *
+ * 双策略自动适应：
+ * - 对话/ASR（gap 大）→ 段落边界由时间间隔决定
+ * - 字幕（gap 近零）→ 段落边界由句末标点决定（每 N 句分段）
+ */
+export function groupTranscriptParagraphs(
+  segments: WhisperSegment[],
+  options: FormatTranscriptOptions = {}
+): TranscriptParagraph[] {
+  const { paragraphGapSec = 2.0, sentencesPerParagraph = 2 } = options
+
+  if (!segments.length) return []
+
+  const paragraphs: TranscriptParagraph[] = []
+  let currentSegs: WhisperSegment[] = []
+  let sentenceEndCount = 0
+
+  function flushParagraph() {
+    if (currentSegs.length > 0) {
+      paragraphs.push({
+        startMs: currentSegs[0].start,
+        endMs: currentSegs[currentSegs.length - 1].end,
+        text: currentSegs.map(s => s.text).join(' ')
+      })
+    }
+    currentSegs = []
+    sentenceEndCount = 0
+  }
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i]
+    const prevSeg = i > 0 ? segments[i - 1] : null
+    const gap = prevSeg ? (seg.start - prevSeg.end) / 1000 : Infinity
+
+    if (gap > paragraphGapSec) {
+      flushParagraph()
+      currentSegs = [seg]
+      if (SENTENCE_END_RE.test(seg.text)) sentenceEndCount++
+      continue
+    }
+
+    if (
+      sentencesPerParagraph > 0 &&
+      sentenceEndCount >= MIN_SENTENCE_BREAK_COUNT &&
+      sentenceEndCount >= sentencesPerParagraph &&
+      SENTENCE_END_RE.test(seg.text)
+    ) {
+      currentSegs.push(seg)
+      flushParagraph()
+      continue
+    }
+
+    currentSegs.push(seg)
+    if (SENTENCE_END_RE.test(seg.text)) sentenceEndCount++
+  }
+
+  flushParagraph()
+  return paragraphs
+}
+
+/**
+ * 将 whisper/subtitle 的平铺 segments 格式化为有段落结构的可读文本。
+ *
+ * 内部调用 groupTranscriptParagraphs() 后 join。
+ */
+export function formatTranscript(
+  segments: WhisperSegment[],
+  options: FormatTranscriptOptions = {}
+): string {
+  const { timestamps = true } = options
+  const paragraphs = groupTranscriptParagraphs(segments, options)
+  return paragraphs
+    .map(p => timestamps ? `[${formatTimestampMs(p.startMs)}] ${p.text}` : p.text)
+    .join('\n\n')
+}
+
+/** 毫秒 → HH:MM:SS / MM:SS 字符串 */
+export function formatTimestampMs(ms: number): string {
+  const total = Math.floor(ms / 1000)
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  return `${m}:${String(s).padStart(2, '0')}`
 }
 
 // ===== 模型路径 =====
@@ -130,16 +257,20 @@ export async function transcribe(
           text: (seg.text || '').trim()
         }))
 
+        // 从 whisper JSON 提取检测到的语言
+        const detectedLanguage = json.result?.language || language
+
         onProgress?.(100, '转录完成')
 
         // 清理 JSON 文件
         try { await fs.unlink(jsonPath) } catch {}
 
         resolve({
-          fullText: segments.map(s => s.text).join(' '),
+          fullText: formatTranscript(segments),
           segments,
-          language,
-          processingTime
+          language: detectedLanguage,
+          processingTime,
+          paragraphs: groupTranscriptParagraphs(segments)
         })
       } catch (e) {
         // 清理 JSON 文件（如果存在）

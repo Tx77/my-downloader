@@ -13,7 +13,12 @@ Use this skill when working on Downloader Pro video analysis: transcript generat
 Capabilities:
 - Subtitle-first strategy: external subtitles → ASR fallback
 - GPU: whisper.cpp Vulkan backend (AMD 7900XTX)
-- Output: `{savePath}/article/{safeTitle}/` (transcript.txt, transcript.json, README.md)
+- **Transcript formatting**: paragraph breaks based on segment gaps + sentence punctuation, timestamps
+- **Bilingual translation**: `translator.ts` LLM paragraph translation (non-Chinese → Chinese), UI toggle, `transcript.bilingual.md`
+- **Existing folder re-analysis**: reads `transcript.json` segments for precise paragraph grouping
+- **LLM resilience**: 120s timeout, article generation failure doesn't lose summary/keypoints/mindmap
+- **Cleanup**: orphan temp file cleanup at pipeline start, kill-before-delete ordering
+- Output: `{savePath}/article/{safeTitle}/` (transcript.txt, transcript.json, transcript.bilingual.md, README.md, analysis.md, analysis.prompt.md, analysis.json)
 
 ### Phase 2 — LLM Deep Analysis ✅
 
@@ -53,7 +58,8 @@ Output files:
 - `analysis.json` — structured cache (includes analysisPreset + classification)
 
 Existing folder analysis:
-- Candidates: `transcript.txt` > `transcript.md` > `transcript.llm.md` > README `## 转录文本` section
+- Priority: `transcript.json` (real segments) > `transcript.txt` > `transcript.md` > `transcript.llm.md` > README
+- `transcript.json` segments provide real timestamps → precise paragraph grouping
 - Uses `select-analysis-folder` IPC (does NOT modify download path)
 
 ### CLI Logs & Progress (Phase 3.6)

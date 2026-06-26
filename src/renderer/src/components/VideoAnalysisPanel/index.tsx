@@ -25,7 +25,11 @@ interface WhisperSegment {
 interface AnalysisResult {
   id: string; title: string; url: string
   subtitleSource: 'external' | 'asr' | 'ocr' | 'none'
-  transcript: { fullText: string; segments: WhisperSegment[]; language: string; processingTime: number }
+  transcript: {
+    fullText: string; segments: WhisperSegment[]; language: string; processingTime: number
+    paragraphs?: { startMs: number; endMs: number; text: string }[]
+    translation?: { targetLanguage: string; paragraphs: string[]; processingTimeMs: number; error?: string }
+  }
   outputFiles: { txt: string; json: string; readme?: string; analysisMd?: string; promptMd?: string }
   savePath: string
   summary?: SummaryResult
@@ -59,19 +63,122 @@ interface Props {
   onLog?: (message: string) => void
 }
 
-const STAGES = ['fetching-info', 'downloading', 'extracting-audio', 'transcribing', 'cross-validating', 'analyzing', 'done'] as const
+const STAGES = ['fetching-info', 'downloading', 'extracting-audio', 'transcribing', 'translating', 'cross-validating', 'analyzing', 'done'] as const
 const STAGE_LABELS: Record<string, string> = {
   'checking-deps': '检查依赖',
   'fetching-info': '获取信息',
   'downloading': '下载',
   'extracting-audio': '提取音频',
   'transcribing': '语音识别',
+  'translating': '翻译',
   'cross-validating': 'ASR+OCR 校验',
   'analyzing': 'AI 内容分析',
   'done': '完成'
 }
 
 type ResultTab = 'article' | 'summary' | 'key-points' | 'mind-map' | 'transcript'
+
+// ── Transcript 段落渲染 ──
+
+const PARAGRAPH_GAP_MS = 2000  // 同 formatTranscript 的默认 2s 阈值
+
+function fmtTime(ms: number): string {
+  const total = Math.floor(ms / 1000)
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+function TranscriptContent({
+  segments,
+  paragraphs,
+  translation
+}: {
+  segments: WhisperSegment[]
+  paragraphs?: { startMs: number; endMs: number; text: string }[]
+  translation?: { targetLanguage: string; paragraphs: string[]; processingTimeMs: number; error?: string }
+}): JSX.Element {
+  const [showTranslation, setShowTranslation] = useState(true)
+
+  if (!segments.length) {
+    return <div style={{ color: '#555', textAlign: 'center', padding: 40 }}>无内容</div>
+  }
+
+  // Use pre-grouped paragraphs from main process, or fallback to gap-based grouping
+  const paraGroups: WhisperSegment[][] = []
+  if (paragraphs?.length) {
+    // Map paragraph boundaries back to segment groups
+    let segIdx = 0
+    for (const para of paragraphs) {
+      const group: WhisperSegment[] = []
+      while (segIdx < segments.length && segments[segIdx].start < para.endMs + 200) {
+        group.push(segments[segIdx])
+        segIdx++
+      }
+      if (group.length) paraGroups.push(group)
+    }
+  } else {
+    // Fallback: gap-based grouping
+    let current: WhisperSegment[] = []
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i]
+      const prev = i > 0 ? segments[i - 1] : null
+      const gap = prev ? seg.start - prev.end : Infinity
+      if (gap > PARAGRAPH_GAP_MS && current.length > 0) {
+        paraGroups.push(current)
+        current = []
+      }
+      current.push(seg)
+    }
+    if (current.length) paraGroups.push(current)
+  }
+
+  const hasTranslation = !!translation?.paragraphs?.length
+
+  return (
+    <div>
+      {hasTranslation && (
+        <div className="bilingual-controls">
+          <label className="bilingual-toggle">
+            <input
+              type="checkbox"
+              checked={showTranslation}
+              onChange={(e) => setShowTranslation(e.target.checked)}
+            />
+            显示{translation!.targetLanguage === 'zh' ? '中文' : '翻译'}对照
+          </label>
+          {translation!.error && (
+            <span className="translation-error-warning" title={translation!.error}>
+              翻译未完成
+            </span>
+          )}
+        </div>
+      )}
+      <div className="transcript-content">
+        {paraGroups.map((para, pi) => (
+          <div key={pi} className="transcript-paragraph">
+            <div className="paragraph-segments">
+              {para.map((seg, si) => (
+                <div key={si} className="segment" data-segment-row data-start-ms={seg.start}>
+                  <span className="segment-time">{fmtTime(seg.start)}</span>
+                  <span className="segment-text">{seg.text}</span>
+                </div>
+              ))}
+            </div>
+            {showTranslation && hasTranslation && translation!.paragraphs[pi] && (
+              <div className="paragraph-translation">
+                <span className="translation-label">ZH</span>
+                <span className="translation-text">{translation!.paragraphs[pi]}</span>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.Element {
   const log = (msg: string) => { onLog?.(msg) }
@@ -300,13 +407,6 @@ export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.El
 
   const handleOpenFile = (filePath?: string) => {
     if (filePath) window.electron.showItemInFolder(filePath)
-  }
-
-  const formatTime = (ms: number) => {
-    const total = Math.floor(ms / 1000)
-    const m = Math.floor(total / 60)
-    const s = total % 60
-    return `${m}:${String(s).padStart(2, '0')}`
   }
 
   const formatElapsed = (sec: number) => {
@@ -800,18 +900,11 @@ export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.El
             )}
 
             {activeTab === 'transcript' && (
-              <div className="transcript-content">
-                {result.transcript.segments.length === 0 ? (
-                  <div style={{ color: '#555', textAlign: 'center', padding: 40 }}>无内容</div>
-                ) : (
-                  result.transcript.segments.map((seg, i) => (
-                    <div key={i} className="segment" data-segment-row data-start-ms={seg.start}>
-                      <span className="segment-time">{formatTime(seg.start)}</span>
-                      <span className="segment-text">{seg.text}</span>
-                    </div>
-                  ))
-                )}
-              </div>
+              <TranscriptContent
+                segments={result.transcript.segments}
+                paragraphs={result.transcript.paragraphs}
+                translation={result.transcript.translation}
+              />
             )}
           </div>
         </div>

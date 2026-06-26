@@ -14,7 +14,8 @@ import Store from 'electron-store'
 import { getBinaryPath, getProxyArgs } from './utils'
 import { createCookieFile, cleanupCookieFile } from './cookie'
 import { extractAudio } from './audio-extractor'
-import { transcribe, checkWhisperDeps, type TranscriberResult } from './transcriber'
+import { transcribe, checkWhisperDeps, formatTranscript, formatTimestampMs, groupTranscriptParagraphs, type WhisperSegment, type TranscriberResult } from './transcriber'
+import { translateParagraphs } from './translator'
 import { extractSubtitles, type OcrSegment } from './ocr-extractor'
 import {
   askQuestion,
@@ -56,6 +57,7 @@ export type AnalysisStage =
   | 'downloading'
   | 'extracting-audio'
   | 'transcribing'
+  | 'translating'
   | 'cross-validating'
   | 'analyzing'
   | 'done'
@@ -214,7 +216,7 @@ async function saveAnalysisFiles(
   await fs.writeFile(txtPath, transcript.fullText, 'utf8')
 
   // JSON
-  await fs.writeFile(jsonPath, JSON.stringify({
+  const jsonData: Record<string, unknown> = {
     title: videoInfo.title,
     url: videoInfo.url,
     analyzedAt: nowUTC8(),
@@ -225,7 +227,11 @@ async function saveAnalysisFiles(
     segmentCount: transcript.segments.length,
     fullText: transcript.fullText,
     segments: transcript.segments.map(s => ({ start: s.start, end: s.end, text: s.text }))
-  }, null, 2), 'utf8')
+  }
+  if (transcript.translation) {
+    jsonData.translation = transcript.translation
+  }
+  await fs.writeFile(jsonPath, JSON.stringify(jsonData, null, 2), 'utf8')
 
   // README.md
   const duration = transcript.segments.length > 0
@@ -251,6 +257,36 @@ async function saveAnalysisFiles(
   ].join('\n')
 
   await fs.writeFile(readmePath, readmeContent, 'utf8')
+
+  // 双语对照文件
+  if (transcript.translation?.paragraphs?.length && transcript.paragraphs?.length) {
+    const bilingualPath = join(articleDir, 'transcript.bilingual.md')
+    const bilingualLines: string[] = [
+      `# ${videoInfo.title}｜双语对照`,
+      '',
+      `- **原文语言**: ${transcript.language}`,
+      `- **翻译语言**: ${transcript.translation.targetLanguage}`,
+      `- **翻译耗时**: ${(transcript.translation.processingTimeMs / 1000).toFixed(1)}s`,
+      ...(transcript.translation.error ? [`- **翻译错误**: ${transcript.translation.error}`] : []),
+      '',
+      '---',
+      ''
+    ]
+    for (let i = 0; i < transcript.paragraphs.length; i++) {
+      const para = transcript.paragraphs[i]
+      const translated = transcript.translation.paragraphs[i]
+      if (!translated) continue
+      bilingualLines.push(`### [${formatTimestampMs(para.startMs)}]`)
+      bilingualLines.push('')
+      bilingualLines.push(`> ${para.text}`)
+      bilingualLines.push('')
+      bilingualLines.push(translated)
+      bilingualLines.push('')
+      bilingualLines.push('---')
+      bilingualLines.push('')
+    }
+    await fs.writeFile(bilingualPath, bilingualLines.join('\n'), 'utf8')
+  }
 
   return { txt: txtPath, json: jsonPath, readme: readmePath, articleDir }
 }
@@ -389,44 +425,152 @@ async function runLlmAnalysis(
     }
   )
 
-  emitProgress('analyzing', 100, 98, 'LLM 内容分析完成')
-  const article = await generateAnalysisArticle(
-    request.url || '已有转录文本',
-    transcript.fullText,
-    toAnalyzerSegments(transcript),
-    {
-      provider,
-      model: llmModel,
-      apiKey: request.llmApiKey || getStoredApiKey(provider),
-      apiBase: request.llmApiBase,
-      language: request.language || 'auto',
-      processSet,
-      onProgress: (message) => emitProgress('analyzing', 95, 97.5, message)
-    },
-    request.analysisPreset ?? 'auto'
-  )
+  emitProgress('analyzing', 95, 96, '正在生成深度分析文章...')
+  let article: { markdown: string; prompt: string; preset: Exclude<AnalysisPreset, 'auto'>; classification?: ContentClassification } | null = null
+  try {
+    article = await generateAnalysisArticle(
+      request.url || '已有转录文本',
+      transcript.fullText,
+      toAnalyzerSegments(transcript),
+      {
+        provider,
+        model: llmModel,
+        apiKey: request.llmApiKey || getStoredApiKey(provider),
+        apiBase: request.llmApiBase,
+        language: request.language || 'auto',
+        processSet,
+        onProgress: (message) => emitProgress('analyzing', 96, 97.5, message)
+      },
+      request.analysisPreset ?? 'auto'
+    )
+    emitProgress('analyzing', 100, 98, 'LLM 内容分析完成')
+  } catch (err) {
+    emitProgress('analyzing', 100, 98, `文章生成失败 (摘要/要点已保留): ${(err as Error).message.slice(0, 80)}`)
+    // 保留 summary/keypoints/mindmap，文章用空字符串兜底
+  }
 
-  return { results, provider, model: llmModel, article: article.markdown, prompt: article.prompt, preset: article.preset, classification: article.classification }
+  return {
+    results, provider, model: llmModel,
+    article: article?.markdown || '',
+    prompt: article?.prompt || '',
+    preset: article?.preset || 'generic',
+    classification: article?.classification
+  }
 }
 
 function plainTextToTranscript(text: string): TranscriberResult {
-  const blocks = text
-    .split(/\n{2,}/)
-    .map((block) => block.trim())
-    .filter(Boolean)
+  const trimmed = text.trim()
 
-  const source = blocks.length ? blocks : text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-  const segments = source.map((line, index) => ({
+  // 如果已有段落结构（双换行），按段落拆分
+  let blocks = trimmed.split(/\n{2,}/).map(b => b.trim()).filter(Boolean)
+
+  // 如果段落太少（比如旧的扁平文本），按句末标点拆分为句子级 segments
+  if (blocks.length <= 2 && trimmed.length > 2000) {
+    const sentences = trimmed.split(/(?<=[。！？.!?])\s+/)
+    blocks = sentences.map(s => s.trim()).filter(b => b.length > 10)
+  }
+
+  const source = blocks.length > 1 ? blocks : [trimmed]
+  const segments: WhisperSegment[] = source.map((line, index) => ({
     start: index * 1000,
     end: (index + 1) * 1000,
     text: line
   }))
 
   return {
-    fullText: text.trim(),
+    fullText: trimmed,
     segments,
-    language: 'zh',
-    processingTime: 0
+    language: guessLanguage(trimmed),
+    processingTime: 0,
+    paragraphs: groupTranscriptParagraphs(segments, { paragraphGapSec: 2.0, sentencesPerParagraph: 2 })
+  }
+}
+
+/** 简单语言检测 */
+function guessLanguage(text: string): string {
+  const sample = text.slice(0, 1000).replace(/\s+/g, '')
+  const cjk = (sample.match(/[\p{Script=Han}]/gu) || []).length
+  const letters = (sample.match(/[\p{Letter}]/gu) || []).length || 1
+  return cjk / letters > 0.5 ? 'zh' : 'en'
+}
+
+// ── 语言检测 ──
+
+/** 检测文本是否已是中文（CJK 字符占比 > 50%） */
+function isChineseText(text: string): boolean {
+  if (!text) return false
+  const stripped = text.replace(/\s+/g, '')
+  if (!stripped) return false
+  const cjkCount = (stripped.match(/[\p{Script=Han}]/gu) || []).length
+  const totalLetters = (stripped.match(/[\p{Letter}\p{Number}]/gu) || []).length || 1
+  return cjkCount / totalLetters > 0.5
+}
+
+// ── 翻译步骤 ──
+
+async function translateTranscriptIfNeeded(
+  transcript: TranscriberResult,
+  _title: string,
+  llmProvider: LLMProvider | undefined,
+  llmModel: string | undefined,
+  llmApiKey: string | undefined,
+  llmApiBase: string | undefined,
+  processSet: Set<ChildProcess>,
+  emitProgress: (stage: AnalysisStage, percent: number, overallPercent: number, message: string) => void
+): Promise<TranscriberResult> {
+  // 无段落 → 跳过
+  if (!transcript.paragraphs?.length) return transcript
+
+  // 检测原文是否已是中文 → 跳过
+  const sample = transcript.paragraphs.map(p => p.text).join(' ').slice(0, 3000)
+  if (isChineseText(sample)) {
+    emitProgress('translating', 100, 90, '原文已是中文，跳过翻译')
+    return transcript
+  }
+
+  // 无 LLM provider → 跳过
+  const provider = llmProvider || 'deepseek'
+  if (provider === 'codex-cli') {
+    emitProgress('translating', 100, 90, 'Codex CLI 暂不支持翻译，跳过')
+    return transcript
+  }
+
+  try {
+    emitProgress('translating', 0, 82, `正在翻译 ${transcript.paragraphs.length} 个段落...`)
+    const result = await translateParagraphs(transcript.paragraphs, {
+      sourceLanguage: transcript.language || 'en',
+      targetLanguage: 'zh',
+      provider: llmProvider || 'deepseek',
+      model: llmModel,
+      apiKey: llmApiKey,
+      apiBase: llmApiBase,
+      processSet,
+      onProgress: (msg) => emitProgress('translating', 40, 84, msg)
+    })
+    emitProgress('translating', 100, 86, `翻译完成: ${result.translations.length} 段`)
+    // 短暂延迟避免下游 LLM 分析触发 API 限流
+    await new Promise(r => setTimeout(r, 1500))
+
+    return {
+      ...transcript,
+      translation: {
+        targetLanguage: 'zh',
+        paragraphs: result.translations,
+        processingTimeMs: result.processingTimeMs
+      }
+    }
+  } catch (err) {
+    const errMsg = (err as Error).message
+    emitProgress('translating', 100, 86, `翻译失败: ${errMsg.slice(0, 100)}`)
+    return {
+      ...transcript,
+      translation: {
+        targetLanguage: 'zh',
+        paragraphs: [],
+        processingTimeMs: 0,
+        error: errMsg
+      }
+    }
   }
 }
 
@@ -553,14 +697,40 @@ function extractTranscriptFromReadme(content: string): string {
   return collected.join('\n').trim()
 }
 
-async function readExistingTranscript(candidatePath: string): Promise<string> {
+interface ReadTranscriptResult {
+  text: string
+  segments?: WhisperSegment[]
+  language?: string
+}
+
+async function readExistingTranscript(candidatePath: string, folderPath: string): Promise<ReadTranscriptResult> {
+  // 优先从 transcript.json 读取（含真实 segments + 时间戳 + 语言）
+  const jsonPath = join(folderPath, 'transcript.json')
+  try {
+    const jsonRaw = await fs.readFile(jsonPath, 'utf8')
+    const json = JSON.parse(jsonRaw)
+    if (Array.isArray(json.segments) && json.segments.length > 0) {
+      return {
+        text: json.fullText || json.segments.map((s: any) => s.text).join(' '),
+        segments: json.segments.map((s: any) => ({
+          start: s.start ?? 0,
+          end: s.end ?? 0,
+          text: String(s.text || '').trim()
+        })),
+        language: json.language || undefined
+      }
+    }
+  } catch {
+    // JSON 不存在或损坏，fall through 到 txt/readme
+  }
+
   const content = await fs.readFile(candidatePath, 'utf8')
   if (basename(candidatePath).toLowerCase() === 'readme.md') {
     const transcript = extractTranscriptFromReadme(content)
-    if (!transcript) throw new Error('README.md 中没有找到“## 转录文本”或“## Transcript”段落。')
-    return transcript
+    if (!transcript) throw new Error('README.md 中没有找到”## 转录文本”或”## Transcript”段落。')
+    return { text: transcript }
   }
-  return content.trim()
+  return { text: content.trim() }
 }
 
 async function listExistingTranscriptCandidates(folderPath: string): Promise<ExistingTranscriptCandidate[]> {
@@ -604,16 +774,31 @@ async function runExistingFolderAnalysis(
     : candidates[0]
   if (!selected) throw new Error('选择的转录文件不在当前文件夹候选列表中。')
 
-  const text = await readExistingTranscript(selected.path)
-  if (!text.trim()) throw new Error('转录文本为空，无法分析。')
+  const readResult = await readExistingTranscript(selected.path, request.folderPath)
+  if (!readResult.text.trim()) throw new Error('转录文本为空，无法分析。')
 
-  const transcript = plainTextToTranscript(text)
+  // 如果有 JSON 里的真实 segments，用它们；否则从纯文本生成
+  const transcript: TranscriberResult = readResult.segments?.length
+    ? {
+        fullText: formatTranscript(readResult.segments),
+        segments: readResult.segments,
+        language: readResult.language || guessLanguage(readResult.text),
+        processingTime: 0,
+        paragraphs: groupTranscriptParagraphs(readResult.segments)
+      }
+    : plainTextToTranscript(readResult.text)
   const title = basename(request.folderPath)
   const readmePath = join(request.folderPath, 'README.md')
   const txtPath = selected.path
   const jsonPath = join(request.folderPath, 'analysis.json')
 
   emitProgress('fetching-info', 100, 10, `已读取 ${selected.name}`)
+
+  const translated = await translateTranscriptIfNeeded(
+    transcript, title,
+    request.llmProvider, request.llmModel, request.llmApiKey, request.llmApiBase,
+    getProcessSet(request.id), emitProgress
+  )
   const analysisRequest: AnalysisRequest = {
     id: request.id,
     url: '',
@@ -625,12 +810,12 @@ async function runExistingFolderAnalysis(
     llmApiBase: request.llmApiBase,
     analysisTypes: request.analysisTypes
   }
-  const llm = await runLlmAnalysis(analysisRequest, transcript, getProcessSet(request.id), emitProgress)
+  const llm = await runLlmAnalysis(analysisRequest, translated, getProcessSet(request.id), emitProgress)
 
   try {
     await fs.access(readmePath)
   } catch {
-    await fs.writeFile(readmePath, [`# ${title}`, '', '## 转录文本', '', text, ''].join('\n'), 'utf8')
+    await fs.writeFile(readmePath, [`# ${title}`, '', '## 转录文本', '', readResult.text, ''].join('\n'), 'utf8')
   }
 
   await appendAnalysisToReadme(readmePath, llm.results)
@@ -642,9 +827,40 @@ async function runExistingFolderAnalysis(
     llmProvider: llm.provider,
     llmModel: llm.model,
     analysis: llm.results,
+    translation: translated.translation,
     ...(llm.preset ? { analysisPreset: llm.preset } : {}),
     ...(llm.classification ? { classification: llm.classification } : {})
   }, null, 2), 'utf8')
+
+  // 生成双语对照文件
+  if (translated.translation?.paragraphs?.length && translated.paragraphs?.length) {
+    const bilingualPath = join(request.folderPath, 'transcript.bilingual.md')
+    const bilingualLines: string[] = [
+      `# ${title}｜双语对照`,
+      '',
+      `- **原文语言**: ${translated.language}`,
+      `- **翻译语言**: ${translated.translation.targetLanguage}`,
+      `- **翻译耗时**: ${(translated.translation.processingTimeMs / 1000).toFixed(1)}s`,
+      ...(translated.translation.error ? [`- **翻译错误**: ${translated.translation.error}`] : []),
+      '',
+      '---',
+      ''
+    ]
+    for (let i = 0; i < translated.paragraphs.length; i++) {
+      const para = translated.paragraphs[i]
+      const translation = translated.translation.paragraphs[i]
+      if (!translation) continue
+      bilingualLines.push(`### [${formatTimestampMs(para.startMs)}]`)
+      bilingualLines.push('')
+      bilingualLines.push(`> ${para.text}`)
+      bilingualLines.push('')
+      bilingualLines.push(translation)
+      bilingualLines.push('')
+      bilingualLines.push('---')
+      bilingualLines.push('')
+    }
+    await fs.writeFile(bilingualPath, bilingualLines.join('\n'), 'utf8')
+  }
 
   killAllProcesses(request.id)
   emitProgress('done', 100, 100, `已有文本分析完成，已追加到 ${readmePath}`)
@@ -654,7 +870,7 @@ async function runExistingFolderAnalysis(
     title,
     url: '',
     subtitleSource: 'none',
-    transcript,
+    transcript: translated,
     outputFiles: { txt: txtPath, json: jsonPath, readme: readmePath, ...readableFiles },
     savePath: request.folderPath,
     summary: llm.results.summary,
@@ -678,6 +894,9 @@ async function runPipeline(
     const elapsed = Math.floor((Date.now() - pipelineStart) / 1000)
     sendProgress(mainWindow, { id, stage, percent, overallPercent, message, elapsed })
   }
+
+  // 清理之前失败运行残留的临时文件
+  await cleanupOrphanTempFiles(savePath)
 
   // === Step 1: 获取视频信息 ===
   emitProgress('fetching-info', 0, 5, '正在获取视频信息...')
@@ -741,11 +960,17 @@ async function runPipeline(
       if (subtitleResult && isReadableTranscript(subtitleResult)) {
         killAllProcesses(id)
 
+        const translatedSub = await translateTranscriptIfNeeded(
+          subtitleResult, videoInfo.title,
+          request.llmProvider, request.llmModel, request.llmApiKey, request.llmApiBase,
+          getProcessSet(id), emitProgress
+        )
+
         const safeTitle = safeFilename(videoInfo.title)
         const files = await saveAnalysisFiles(savePath, safeTitle,
           { title: videoInfo.title, url },
-          'external', model, language, subtitleResult)
-        const llm = await runLlmAnalysis(request, subtitleResult, getProcessSet(id), emitProgress)
+          'external', model, language, translatedSub)
+        const llm = await runLlmAnalysis(request, translatedSub, getProcessSet(id), emitProgress)
         await appendAnalysisToReadme(files.readme, llm.results)
         await mergeAnalysisIntoJson(files.json, llm.results, llm.provider, llm.model, { analysisPreset: llm.preset, classification: llm.classification })
         const readableFiles = await writeReadableAnalysisFiles(files.articleDir, videoInfo.title, llm)
@@ -754,7 +979,7 @@ async function runPipeline(
         return {
           id, title: videoInfo.title, url,
           subtitleSource: 'external',
-          transcript: subtitleResult,
+          transcript: translatedSub,
           outputFiles: { txt: files.txt, json: files.json, readme: files.readme, ...readableFiles },
           savePath: files.articleDir,
           summary: llm.results.summary,
@@ -852,18 +1077,25 @@ async function runPipeline(
     emitProgress('cross-validating', 0, 85, 'Cross-validating ASR and OCR segments...')
     const validation = crossValidate(asrResult.segments, ocrResult.segments)
     const transcriptOcr: TranscriberResult = {
-      fullText: validation.merged.map((segment) => segment.text).join(' '),
+      fullText: formatTranscript(validation.merged),
       segments: validation.merged,
+      paragraphs: groupTranscriptParagraphs(validation.merged),
       language: asrResult.language || language,
       processingTime: asrResult.processingTime + ocrResult.processingTime
     }
-    emitProgress('cross-validating', 100, 90,
+    emitProgress('cross-validating', 100, 82,
       `Cross-validation complete: matched ${validation.stats.matched}, corrected ${validation.stats.corrected}, discarded OCR-only ${validation.stats.ocrOnly}, kept ASR-only ${validation.stats.asrOnly}`)
+
+    const translatedOcr = await translateTranscriptIfNeeded(
+      transcriptOcr, videoInfo.title,
+      request.llmProvider, request.llmModel, request.llmApiKey, request.llmApiBase,
+      procSet, emitProgress
+    )
 
     const safeTitleOcr = safeFilename(videoInfo.title)
     const filesOcr = await saveAnalysisFiles(savePath, safeTitleOcr,
-      { title: videoInfo.title, url }, 'ocr', model, language, transcriptOcr)
-    const llmOcr = await runLlmAnalysis(request, transcriptOcr, procSet, emitProgress)
+      { title: videoInfo.title, url }, 'ocr', model, language, translatedOcr)
+    const llmOcr = await runLlmAnalysis(request, translatedOcr, procSet, emitProgress)
     await appendAnalysisToReadme(filesOcr.readme, llmOcr.results)
     await mergeAnalysisIntoJson(filesOcr.json, llmOcr.results, llmOcr.provider, llmOcr.model, { analysisPreset: llmOcr.preset, classification: llmOcr.classification })
     const readableFilesOcr = await writeReadableAnalysisFiles(filesOcr.articleDir, videoInfo.title, llmOcr)
@@ -883,7 +1115,7 @@ async function runPipeline(
     return {
       id, title: videoInfo.title, url,
       subtitleSource: 'ocr',
-      transcript: transcriptOcr,
+      transcript: translatedOcr,
       outputFiles: { txt: filesOcr.txt, json: filesOcr.json, readme: filesOcr.readme, ...readableFilesOcr },
       savePath: filesOcr.articleDir,
       summary: llmOcr.results.summary,
@@ -974,14 +1206,21 @@ async function runPipeline(
     processSet: procSet  // ← 关键: 让 transcribe 的 whisper-cli 进程可被取消
   })
 
-  emitProgress('transcribing', 100, 90, `转录完成, ${transcript.segments.length} 个片段`)
+  emitProgress('transcribing', 100, 82, `转录完成, ${transcript.segments.length} 个片段`)
+
+  // === 翻译 ===
+  const translated = await translateTranscriptIfNeeded(
+    transcript, videoInfo.title,
+    request.llmProvider, request.llmModel, request.llmApiKey, request.llmApiBase,
+    procSet, emitProgress
+  )
 
   // === 保存到 article/ ===
   const safeTitle = safeFilename(videoInfo.title)
   const files = await saveAnalysisFiles(savePath, safeTitle,
     { title: videoInfo.title, url },
-    'asr', model, language, transcript)
-  const llm = await runLlmAnalysis(request, transcript, procSet, emitProgress)
+    'asr', model, language, translated)
+  const llm = await runLlmAnalysis(request, translated, procSet, emitProgress)
   await appendAnalysisToReadme(files.readme, llm.results)
   await mergeAnalysisIntoJson(files.json, llm.results, llm.provider, llm.model, { analysisPreset: llm.preset, classification: llm.classification })
   const readableFiles = await writeReadableAnalysisFiles(files.articleDir, videoInfo.title, llm)
@@ -1003,7 +1242,7 @@ async function runPipeline(
   return {
     id, title: videoInfo.title, url,
     subtitleSource: 'asr',
-    transcript,
+    transcript: translated,
     outputFiles: { txt: files.txt, json: files.json, readme: files.readme, ...readableFiles },
     savePath: files.articleDir,
     summary: llm.results.summary,
@@ -1089,15 +1328,19 @@ async function downloadAndParseSubtitles(
         })
       }
 
-      try { await fs.unlink(subPath) } catch {}
+      // 清理所有下载的字幕文件（yt-dlp 可能下载了多个语言版本）
+      for (const f of subtitleFiles) {
+        try { await fs.unlink(join(savePath, f)) } catch {}
+      }
 
       if (!segments.length) return resolve(null)
 
       resolve({
-        fullText: segments.map(s => s.text).join(' '),
+        fullText: formatTranscript(segments),
         segments,
         language: 'zh',
-        processingTime: 0
+        processingTime: 0,
+        paragraphs: groupTranscriptParagraphs(segments)
       })
     })
 
@@ -1106,6 +1349,16 @@ async function downloadAndParseSubtitles(
 }
 
 // ===== 清理 =====
+
+/** 清理之前失败运行残留的孤儿临时文件（analysis_*_video.mp4 / analysis_*_audio.wav / analysis_*_sub.*.vtt） */
+async function cleanupOrphanTempFiles(savePath: string) {
+  const entries = await fs.readdir(savePath).catch(() => [])
+  for (const entry of entries) {
+    if (/^analysis_[0-9a-f-]+_(video|audio|sub)\./.test(entry)) {
+      try { await fs.unlink(join(savePath, entry)) } catch {}
+    }
+  }
+}
 
 async function cleanupAnalysisFiles(savePath: string, id: string) {
   const entries = await fs.readdir(savePath).catch(() => [])
@@ -1130,8 +1383,10 @@ export function setupAnalysisHandlers(mainWindow: BrowserWindow) {
     } catch (e) {
       const errorMsg = (e as Error).message
       mainWindow.webContents.send('analysis-error', { id: request.id, error: errorMsg })
-      await cleanupAnalysisFiles(request.savePath, request.id)
       killAllProcesses(request.id)
+      // 延迟让进程完全退出，避免文件被锁
+      await new Promise(r => setTimeout(r, 800))
+      await cleanupAnalysisFiles(request.savePath, request.id)
       return { id: request.id, error: errorMsg }
     }
   })
@@ -1170,6 +1425,9 @@ export function setupAnalysisHandlers(mainWindow: BrowserWindow) {
       const errorMsg = (e as Error).message
       mainWindow.webContents.send('analysis-error', { id: request.id, error: errorMsg })
       killAllProcesses(request.id)
+      await new Promise(r => setTimeout(r, 800))
+      // 已有文件夹分析不会下载视频，但以防万一清理临时文件
+      await cleanupAnalysisFiles(request.folderPath, request.id)
       return { id: request.id, error: errorMsg }
     }
   })

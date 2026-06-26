@@ -22,7 +22,8 @@ src/
 │       ├── transcriber.ts         # whisper.cpp ASR (Vulkan GPU)
 │       ├── ocr-extractor.ts       # [NEW] OCR 硬字幕提取 (RapidOCR + DirectML)
 │       ├── content-analyzer.ts    # LLM 分析 (Prompt/Preset路由/文章生成)
-│       └── analysis-pipeline.ts   # 分析流水线编排 (URL+已有文本+OCR)
+│       ├── translator.ts          # [NEW] LLM 段落翻译 (原文→中文, 双语对照)
+│       └── analysis-pipeline.ts   # 分析流水线编排 (URL+已有文本+OCR+翻译)
 ├── prompts/                       # [NEW] Prompt 预设定义
 │   ├── common.ts                  #   公共规则 + 动态字数函数
 │   ├── classification.ts          #   Stage 0 内容分类 prompt
@@ -63,7 +64,12 @@ resources/
 - 策略: subtitle-first (优先外挂字幕, 否则下载+ASR)
 - 5 阶段进度: 获取信息→下载→提取音频→转录→分析
 - 全进程追踪取消 (yt-dlp + ffmpeg + whisper, 无孤儿进程)
-- 输出: `{savePath}/article/{title}/` (transcript.txt / transcript.json / README.md / analysis.md / analysis.prompt.md / analysis.json)
+- **转录格式化**: `formatTranscript()` 基于 segment 时间间隔 + 句末标点自动分段, 段落首行加时间戳。`groupTranscriptParagraphs()` 返回结构化段落数组。字幕/OCR/ASR 三路径统一使用
+- **双语翻译**: `translator.ts` 用 LLM 将非中文转录按段落翻译为中文。流水线自动运行（`translating` stage），中文内容自动跳过。翻译失败不阻塞分析。输出 `transcript.bilingual.md`（逐段原文+翻译对照）。UI 转录文本 tab 有"显示中文对照"开关
+- **已有文件夹分析增强**: 优先读取 `transcript.json` 中的真实 segments（含毫秒时间戳），实现精确段落分组
+- **LLM 容错**: `callLLM` 增加 120s 超时 + 详细网络错误信息。`generateAnalysisArticle` 失败不丢失摘要/要点/思维导图
+- **临时文件清理**: 流水线启动时清理孤儿文件；IPC error handler 先杀进程再删文件（避免 Windows 文件锁）
+- 输出: `{savePath}/article/{title}/` (transcript.txt / transcript.json / transcript.bilingual.md / README.md / analysis.md / analysis.prompt.md / analysis.json)
 
 **Phase 2 — LLM 深度分析 ✅:**
 - Provider: DeepSeek (默认), OpenAI-compatible, Codex CLI
@@ -96,11 +102,13 @@ resources/
 - **路径**: `app.isPackaged` 区分 dev/packaged
 - **Python 子进程**: stdin/stdout JSON 行协议, 单帧/批量两种模式
 
-## 下一步 (Phase 3.5)
+## 下一步 (Phase 4)
 
-**ASR + OCR 交叉验证** — 解决纯 OCR 噪音多的问题。
-
-方案: ASR 为主, OCR 为辅。跑 ASR 转录后, 用 OCR 文本做交叉校验。匹配的部分双源确认高置信度, OCR 独有的丢弃(大概率画面噪音), ASR 独有的保留。
+- whisper-server 常驻模式
+- 批量分析
+- 跨视频问答/RAG
+- 导出格式 (PDF/HTML)
+- 分析模板优化 (TED 演讲等特定内容类型)
 
 详见 `.claude/skills/video-analysis/plan.md`
 
@@ -120,6 +128,10 @@ resources/
 12. **预设文件**: 新增 preset 需在 `index.ts` 的 `PRESETS` 注册表中添加对应条目。
 13. **模型部署路径**: `getModelDir()` 使用 `app.getPath('userData')`，此路径基于 `package.json` 的 `name` 字段（`my-downloader`）。模型文件必须放在 `%APPDATA%/my-downloader/whisper-models/`，**不是** `Downloader Pro/`！打包时 `electron-builder.yml` 的 `productName` 只是安装包显示名，不影响 `userData` 路径。
 14. **打包前必做**: (1) 升级 `package.json` 版本号 (2) 确保 yt-dlp 是最新版 `./resources/bin/yt-dlp.exe -U`
+15. **转录格式化**: `formatTranscript()` 在 `transcriber.ts` 中，纯函数无副作用。基于 segment gap (默认 2s) 确定段落边界，段落首行加时间戳。字幕/OCR/ASR 三路径统一使用。`plainTextToTranscript` 保留原始文本格式不重建。
+16. **转录翻译**: `translator.ts` 新增模块。用 LLM 翻译段落数组，单次调用完成。`translateParagraphs()` 导入 `callLLM` + `extractJson`（已 export）。`transcribe()` 从 whisper JSON 提取检测语言。翻译失败不阻塞流水线。
+17. **临时文件清理**: Windows 上 `fs.unlink` 会因进程锁文件而静默失败 → 视频残留。IPC error handler 必须先 `killAllProcesses`，等 800ms，再 `cleanupAnalysisFiles`。流水线启动时 `cleanupOrphanTempFiles` 清理之前残留。
+18. **已有文件夹分析**: `readExistingTranscript` 优先读 `transcript.json`（含真实 segments + 时间戳），Fallback 到 `transcript.txt`。JSON 里的 segments 用于 `groupTranscriptParagraphs` 精确分段，纯文本则按句末标点拆分。
 
 ## 文档维护规则
 

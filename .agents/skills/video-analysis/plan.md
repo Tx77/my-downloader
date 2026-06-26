@@ -1,7 +1,7 @@
 ﻿# 视频内容分析工具 — 技术方案
 
 > **更新**: 2026-06-26
-> **当前阶段**: Phase 1 ✅ | Phase 2 ✅ | Phase 2.5 ✅ | Phase 3 ✅ | Phase 3.5 📋
+> **当前阶段**: Phase 1 ✅ | Phase 2 ✅ | Phase 2.5 ✅ | Phase 3 ✅ | Phase 3.5 ✅ | Phase 3.6 ✅ | Phase 4 📋
 
 ## 实现状态
 
@@ -11,7 +11,8 @@
 | Phase 2 | LLM 深度内容分析 (文章/可信度评分/广告过滤) | ✅ 完成 |
 | Phase 2.5 | Prompt Preset Router (内容分类 + 6 套预设 + 动态字数) | ✅ 完成 |
 | Phase 3 | OCR 硬字幕提取 (RapidOCR + DirectML GPU) | ✅ 完成 |
-| Phase 3.5 | ASR + OCR 交叉验证 | 📋 设计中 |
+| Phase 3.5 | ASR + OCR 交叉验证 | ✅ 完成 |
+| Phase 3.6 | CLI 日志/进度优化 + 转录格式化 + 双语翻译 | ✅ 完成 |
 | Phase 4 | whisper-server 常驻 / 批量 / 问答增强 | 📋 待实现 |
 
 ---
@@ -22,7 +23,12 @@
 - whisper.cpp ASR, Vulkan GPU 加速 (7900XTX)
 - 字幕优先策略: 外挂字幕 → ASR fallback
 - 5 阶段进度 + 全进程追踪取消
-- 输出: `{savePath}/article/{title}/` (transcript.txt, transcript.json, README.md)
+- **转录格式化** (2026-06-26): `formatTranscript()` 基于 segment gap (默认 2s) + 句末标点双策略自动分段，段落首行加时间戳。`groupTranscriptParagraphs()` 返回结构化段落数组。字幕/OCR/ASR 三路径 + 已有文件夹分析统一使用
+- **双语翻译** (2026-06-26): `translator.ts` LLM 段落翻译模块。非中文 → 中文自动翻译。单次 LLM 调用完成所有段落。`transcript.bilingual.md` 逐段原文+翻译对照。UI 双语开关。翻译失败不阻塞流水线
+- **已有文件夹分析增强**: 优先读 `transcript.json` 获取 whisper 原始 segments (真实毫秒时间戳 → 精确段落分组)
+- **LLM 容错**: `callLLM` 120s 超时 + 详细错误。`generateAnalysisArticle` 失败保留摘要/要点/思维导图
+- **临时文件清理修复**: IPC error handler 先 kill 进程 (等 800ms) 再删文件。流水线启动时清孤儿文件
+- 输出: `{savePath}/article/{title}/` (transcript.txt / transcript.json / transcript.bilingual.md / README.md / analysis.md / analysis.prompt.md / analysis.json)
 
 ## Phase 2: LLM 深度内容分析 ✅
 
@@ -209,10 +215,58 @@ function crossValidate(
 - [ ] 已有文件夹分析路径的进度消息改进
 
 ---
+## Phase 3.6: 转录格式化 + 双语翻译 ✅
+
+### 转录段落格式化
+
+`src/main/modules/transcriber.ts`:
+- `formatTranscript(segments, options)` — 双策略自适应: gap > 2s 硬分段(ASR), 句末标点每 N 句分段(字幕)
+- `groupTranscriptParagraphs(segments, options)` — 返回 `TranscriptParagraph[]` 数组
+- `TranscriptParagraph = { startMs, endMs, text }`
+- `TranscriberResult` 新增 `paragraphs?` + `translation?` 字段
+- `transcribe()` 从 whisper JSON 提取检测语言 (`json.result.language`)
+
+### 双语翻译
+
+`src/main/modules/translator.ts` (新文件):
+- `translateParagraphs(paragraphs, options)` — 单次 LLM 调用，返回 `TranslationResult`
+- 所有段落编号后一次性发送，返回 JSON 数组
+- Prompt 强调: 保留原意/语气/修辞，专有名词不翻译
+- 复用 `callLLM` + `extractJson` (已 export)
+
+`src/main/modules/analysis-pipeline.ts`:
+- 新增 `translating` stage (progress 82-86%)
+- `translateTranscriptIfNeeded()` — 统一翻译入口，CJK 检测 (>50% 跳过)，try-catch 兜底
+- 注入 4 条流水线路径 (subtitle/ASR/OCR/existing-folder)
+- `saveAnalysisFiles` 生成 `transcript.bilingual.md`
+- `runExistingFolderAnalysis` 也生成双语文件
+
+### 已有文件夹分析增强
+
+- `readExistingTranscript` 优先读 `transcript.json` 获取真实 segments (含毫秒时间戳)
+- Fallback 到 `transcript.txt` → `plainTextToTranscript` (按句末标点拆分)
+- `guessLanguage(text)` CJK 占比检测
+
+### UI
+
+- `TranscriptContent` 组件重构: 使用 `paragraphs` prop (非重新按 gap 分组)
+- "显示中文对照" checkbox，默认勾选
+- `.paragraph-translation` 绿色左边框 + 深绿背景样式
+- `AnalysisResultPayload.transcript` 新增 `paragraphs?` + `translation?`
+
+### LLM 容错 + 临时文件清理
+
+- `callLLM` 加 120s AbortController 超时，区分 timeout vs network error
+- `runLlmAnalysis` 中 `generateAnalysisArticle` 失败 → catch 后保留 summary/keypoints/mindmap
+- IPC error handler: 先 `killAllProcesses` → 等 800ms → `cleanupAnalysisFiles`
+- `cleanupOrphanTempFiles()` 在流水线启动时清理上次残留
+- `downloadAndParseSubtitles` 清理所有字幕文件 (之前只删第一个)
+
 ## Phase 4: 优化 📋
 
 - whisper-server 常驻模式 (见 `whisper-optimization.md`)
 - 批量分析
 - 跨视频问答/RAG
 - 导出格式 (PDF/HTML)
+- 分析模板优化 (TED 演讲等)
 

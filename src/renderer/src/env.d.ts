@@ -61,6 +61,13 @@ interface AnalysisResultPayload {
     segments: { start: number; end: number; text: string }[]
     language: string
     processingTime: number
+    paragraphs?: { startMs: number; endMs: number; text: string }[]
+    translation?: {
+      targetLanguage: string
+      paragraphs: string[]
+      processingTimeMs: number
+      error?: string
+    }
   }
   outputFiles: { txt: string; json: string; readme?: string; analysisMd?: string; promptMd?: string }
   savePath: string

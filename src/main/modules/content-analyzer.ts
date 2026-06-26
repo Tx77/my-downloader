@@ -136,7 +136,7 @@ async function resolveApiKey(options: AnalyzerOptions, provider: Exclude<LLMProv
   return env[PROVIDERS[provider].envKey] || ''
 }
 
-async function callLLM(
+export async function callLLM(
   systemPrompt: string,
   userPrompt: string,
   options: AnalyzerOptions = {},
@@ -153,22 +153,38 @@ async function callLLM(
     throw new Error(`${provider} API key missing. Add ${config.envKey} to .env or enter it in LLM settings.`)
   }
 
-  const response = await fetch(options.apiBase || config.endpoint, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      'content-type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: options.model || config.defaultModel,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
-      temperature: 0.2,
-      max_tokens: maxTokens
+  const endpoint = options.apiBase || config.endpoint
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 120_000) // 120s timeout
+
+  let response: Response
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: options.model || config.defaultModel,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        temperature: 0.2,
+        max_tokens: maxTokens
+      }),
+      signal: controller.signal
     })
-  })
+  } catch (err) {
+    clearTimeout(timeoutId)
+    const msg = (err as Error).message || String(err)
+    if (msg.includes('abort')) {
+      throw new Error(`LLM API timeout (120s) calling ${endpoint}. DeepSeek may be slow or unreachable.`)
+    }
+    throw new Error(`LLM API network error calling ${endpoint}: ${msg}`)
+  }
+  clearTimeout(timeoutId)
 
   if (!response.ok) {
     const text = await response.text().catch(() => '')
@@ -203,22 +219,77 @@ function callCodexCli(systemPrompt: string, userPrompt: string, options: Analyze
   })
 }
 
+/**
+ * 将文本按最大字符数切块，优先在段落边界处切分。
+ *
+ * 切分优先级:
+ * 1. 段落边界 (双换行 \n\n) — 最好的切分点
+ * 2. 单换行 — 次优选
+ * 3. 句末标点 (。！？. ! ?) + 空格 — 兜底
+ * 4. 硬切 — 最后手段
+ *
+ * 现在 transcript 已格式化 (段落 + 时间戳)，这个函数会尽量保持段落完整。
+ */
 function chunkText(text: string, maxChars = MAX_CHARS_PER_REQUEST): string[] {
   if (text.length <= maxChars) return [text]
 
   const chunks: string[] = []
   let cursor = 0
+
   while (cursor < text.length) {
-    let end = Math.min(cursor + maxChars, text.length)
-    const breakAt = text.lastIndexOf('\n', end)
-    if (breakAt > cursor + maxChars * 0.5) end = breakAt
-    chunks.push(text.slice(cursor, end).trim())
-    cursor = end
+    // 如果剩余部分已经小于 maxChars，直接收尾
+    if (text.length - cursor <= maxChars) {
+      chunks.push(text.slice(cursor).trim())
+      break
+    }
+
+    const targetEnd = Math.min(cursor + maxChars, text.length)
+    let breakAt: number
+    let separator: string
+
+    // Priority 1: paragraph boundary (\n\n) within range
+    breakAt = text.lastIndexOf('\n\n', targetEnd)
+    if (breakAt > cursor + maxChars * 0.3) {
+      separator = '\n\n'
+    } else {
+      // Priority 2: single newline
+      breakAt = text.lastIndexOf('\n', targetEnd)
+      if (breakAt > cursor + maxChars * 0.5) {
+        separator = '\n'
+      } else {
+        // Priority 3: sentence-ending punctuation
+        const searchStart = cursor + Math.floor(maxChars * 0.6)
+        const searchRegion = text.slice(searchStart, targetEnd)
+        const punctMatch = searchRegion.match(/[。！？.!?]\s/g)
+        if (punctMatch) {
+          breakAt = searchStart + searchRegion.lastIndexOf(punctMatch[punctMatch.length - 1]) + 1
+          separator = ' '
+        } else {
+          // Priority 4: hard cut
+          breakAt = targetEnd
+          separator = ''
+        }
+      }
+    }
+
+    chunks.push(text.slice(cursor, breakAt).trim())
+    cursor = skipAfter(text, breakAt, separator)
   }
+
   return chunks.filter(Boolean)
 }
 
-function extractJson<T>(text: string, fallback: T): T {
+/** 从 position 开始跳过指定分隔符字符，返回新的位置 */
+function skipAfter(text: string, position: number, separator: string): number {
+  if (!separator) return position
+  let pos = position
+  while (pos < text.length && separator.includes(text[pos])) {
+    pos++
+  }
+  return pos
+}
+
+export function extractJson<T>(text: string, fallback: T): T {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
   const candidate = fenced?.[1] || text
   const firstArray = candidate.indexOf('[')
