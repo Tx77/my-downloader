@@ -1,7 +1,7 @@
 # 视频内容分析工具 — 技术方案
 
-> **更新**: 2026-06-25
-> **当前阶段**: Phase 1 ✅ | Phase 2 ✅ | Phase 3 📋
+> **更新**: 2026-06-26
+> **当前阶段**: Phase 1 ✅ | Phase 2 ✅ | Phase 3 🔧
 
 ## 实现状态
 
@@ -9,7 +9,7 @@
 |-------|------|------|
 | Phase 1 | 音频提取 + ASR 转录 + GPU 加速 + 分析面板 | ✅ 完成 |
 | Phase 2 | LLM 深度内容分析 (文章/可信度评分/广告过滤) | ✅ 完成 |
-| Phase 3 | OCR 硬字幕提取 | 📋 待实现 |
+| Phase 3 | OCR 硬字幕提取 | 🔧 开发中 (RapidOCR + DirectML GPU) |
 | Phase 4 | whisper-server 常驻 / 批量 / 问答增强 | 📋 待实现 |
 
 ---
@@ -48,195 +48,125 @@
 
 ---
 
-## Phase 3: OCR 硬字幕提取 📋
+## Phase 3: OCR 硬字幕提取 🔧
 
-### 问题
-当前 subtitle-first 策略依赖 yt-dlp 提取外挂字幕。部分视频的字幕是"烧录"在画面中的（硬字幕），yt-dlp 无法提取。ASR 对某些场景效果差（背景音乐、多人重叠、方言）。
+### 实现状态 (2026-06-26)
 
-### 方案
-新增第三种策略: subtitle-first → ASR → **OCR**
+**已实现**:
+- OCR 策略选项已加入 UI（三选一：字幕优先 / 纯 ASR / OCR 硬字幕）
+- ffmpeg 抽帧 + 纯 TypeScript pHash 去重（无外部依赖）
+- RapidOCR Python 子进程（替换了原计划的 PaddleOCR）
+- DirectML GPU 加速（通过 monkey-patch 强制开启）
+- `cropBottom: true` 默认只识别画面底部 1/3
+- 乱码过滤（URL、日期、社交账号、非中文片段）
 
+**架构**:
 ```
-策略选择 (VideoAnalysisPanel strategy dropdown):
-  subtitle-first (默认) — 优先外挂字幕, 无字幕则 ASR
-  asr-only           — 下载视频 → ASR
-  ocr                 — [NEW] 下载视频 → OCR 硬字幕提取
-```
-
-OCR 作为独立策略而非 fallback，因为：
-- 用户清楚自己面对的是硬字幕视频
-- OCR 和 ASR 的适用场景不同，不需要自动切换
-
-### 技术选型
-
-**OCR 引擎: PaddleOCR**
-- Python 库，中文识别 SOTA（State of the Art）
-- 支持中英文混合、竖排文字、多角度
-- 轻量模型可在 CPU 上运行，有 GPU 加速选项
-- 安装: `pip install paddlepaddle paddleocr`
-
-**帧提取: ffmpeg**
-- 项目已捆绑 `ffmpeg.exe`，直接用 `getBinaryPath('ffmpeg')`
-- 抽帧命令:
-  ```
-  ffmpeg -i input.mp4 -vf "fps=1" -q:v 2 frame_%04d.png
-  ```
-- `fps=1` = 每秒 1 帧
-- `-q:v 2` = 高质量 PNG 输出
-
-**去重: 感知哈希 (pHash)**
-- 库: `imghash` 或手写（~50 行）
-- 原理: 缩放 → 灰度 → DCT → 二值化 → 汉明距离比较
-- 相邻帧汉明距离 < 阈值 → 视为重复，跳过 OCR
-- 只 OCR 有字幕变化的帧：~600 原始帧 → 100-200 有效帧
-
-**字幕区域裁剪 (可选优化)**
-- 只裁剪画面底部 1/3 给 OCR
-- ffmpeg 可直接裁剪: `-vf "fps=1,crop=iw:ih/3:0:ih*2/3"`
-- 减少 OCR 误识别（不会被画面内容干扰）
-
-### 新增文件
-
-#### `src/main/modules/ocr-extractor.ts`
-
-```typescript
-// 核心接口
-export interface OcrOptions {
-  videoPath: string
-  language?: string        // 'ch' | 'en' | 'ch_en'
-  fps?: number             // 抽帧间隔, 默认 1
-  cropBottom?: boolean     // 是否只识别底部 1/3
-  onProgress?: (message: string) => void
-  processSet?: Set<ChildProcess>
-}
-
-export interface OcrResult {
-  fullText: string
-  segments: Array<{ start: number; end: number; text: string }>
-  frameCount: number       // 总抽帧数
-  uniqueFrameCount: number // 去重后帧数
-  processingTime: number   // ms
-}
-
-// 核心函数
-export async function extractSubtitles(options: OcrOptions): Promise<OcrResult>
+下载视频 → ffmpeg fps=1 抽帧 → pHash 去重
+→ RapidOCR (Python 子进程, stdin/stdout JSON 协议)
+→ 合并时间轴 → 过滤非字幕文本 → 输出 transcript
+→ Phase 2 LLM 分析 (复用)
 ```
 
-**实现流程**:
-1. `spawn(ffmpeg, [...])` 抽帧到临时目录 → 加入 processSet
-2. 遍历 PNG 文件，计算 pHash，去重
-3. 对去重后的帧，逐帧调用 PaddleOCR:
-   - 方式 A: `spawn('python', ['-c', '...'])` 子进程
-   - 方式 B: HTTP 调用本地 PaddleOCR service
-   - 方式 C: 用 `child_process.execFile` 调 Python 脚本
-4. 合并 OCR 文本，按时间轴（帧序号 → 秒数）生成 segments
-5. 清理临时 PNG 文件
+### 当前问题 / Gotchas
 
-**PaddleOCR Python 子进程方案** (推荐方式 C):
-
-创建 `resources/ocr/ocr_worker.py`:
-```python
-import sys, json
-from paddleocr import PaddleOCR
-
-ocr = PaddleOCR(lang='ch')  # 初始化一次
-
-for line in sys.stdin:
-    req = json.loads(line)
-    result = ocr.ocr(req['path'], cls=False)
-    # 提取文本
-    texts = []
-    for page in result:
-        if page:
-            for box in page:
-                texts.append(box[1][0])
-    print(json.dumps({'id': req['id'], 'text': ' '.join(texts)}), flush=True)
-```
-
-主进程用 `spawn('python', ['resources/ocr/ocr_worker.py'])` 启动，通过 stdin/stdout JSON 行协议通信。进程必须加入 processSet。
-
-**pHash 实现** (~50 行，写在 ocr-extractor.ts 内):
-```typescript
-// 不需要额外依赖，纯 TypeScript
-function pHash(buf: Buffer, width: number, height: number): string {
-  // 1. 缩放至 8x8
-  // 2. 转灰度
-  // 3. 计算 DCT
-  // 4. 取左上角 8x8
-  // 5. 与均值比较 → 64-bit hash
-}
-```
-
-### 修改现有文件
-
-#### `src/main/modules/analysis-pipeline.ts`
-
-在 `runPipeline` 中添加 OCR 分支:
-```typescript
-// 在下载视频步骤之后 (Step 3 结束), 添加:
-if (strategy === 'ocr') {
-  emitProgress('extracting-audio', 0, 55, '正在 OCR 提取硬字幕...')
-  const ocrResult = await extractSubtitles({
-    videoPath,
-    language,
-    onProgress: (msg) => emitProgress('extracting-audio', 50, 60, msg),
-    processSet: procSet
-  })
-  // ocrResult 格式与 TranscriberResult 兼容，直接作为 transcript 使用
-  // ...
-}
-```
-
-`AnalysisRequest.strategy` 类型扩展:
-```typescript
-strategy?: 'subtitle-first' | 'asr-only' | 'ocr'
-```
-
-#### `src/renderer/src/components/VideoAnalysisPanel/index.tsx`
-
-策略下拉添加选项:
-```tsx
-<select value={strategy} onChange={...}>
-  <option value="subtitle-first">字幕优先</option>
-  <option value="asr-only">纯 ASR</option>
-  <option value="ocr">OCR 硬字幕</option>  {/* NEW */}
-</select>
-```
-
-### PaddleOCR 部署方式
-
-| 方式 | 优点 | 缺点 | 推荐度 |
-|------|------|------|--------|
-| Python 子进程 | 简单，不需要额外服务 | 首次加载慢 (~3s)，需要 Python 环境 | ⭐⭐⭐ |
-| HTTP Service | 一次加载，多次使用 | 需要额外启动/管理服务 | ⭐⭐ |
-| ONNX 导出 + Node.js 推理 | 不需要 Python | 工作量大，模型兼容性差 | ⭐ |
-
-**推荐**: 先用 Python 子进程方案快速跑通，后续可优化为 HTTP service 常驻（类似 whisper-server 模式）。
+1. **乱码**: Windows pipe 默认 GBK (cp936) 编码 → 已在 spawn 设 `PYTHONIOENCODING=utf-8` + worker 内 `sys.stdout.reconfigure(encoding='utf-8')`
+2. **GPU 不工作**: RapidOCR 内部 `use_dml` 默认 false → 已 monkey-patch `ProviderConfig.is_dml_available()` 返回 True
+3. **OCR 识别画面所有文字**: 不只字幕 → 已启用 `cropBottom: true` + 后置文本过滤器
+4. **numpy 2.x 兼容**: `onnxruntime-directml` 需要 numpy<2 → 已降级
+5. **速度慢**: DirectML 首帧 shader 编译 ~10-15s，后续帧秒级。ASR（whisper GPU）是一次性推理所以快，OCR 是 N 帧逐帧推理，本质不同
 
 ### 依赖
 - Python 3.8+
-- `pip install paddlepaddle paddleocr`
+- `pip install rapidocr onnxruntime-directml "numpy<2"`
 - ffmpeg（已捆绑）
-- 不需要 GPU（PaddleOCR CPU 模式即可）
 
-### 验证方法
-```bash
-# 手动测试 OCR
-ffmpeg -i test_video.mp4 -vf "fps=1" -q:v 2 frames/test_%04d.png
-python -c "from paddleocr import PaddleOCR; ocr = PaddleOCR(lang='ch'); print(ocr.ocr('frames/test_0001.png'))"
+### 待解决
+- DirectML GPU 占用率低（模型小、batch=1，GPU 利用率天然不如 ASR 大模型）
+- 无硬字幕视频用 OCR 会产出噪音（需用户自行判断策略选择）
+- 可考虑批量推理多帧提升 GPU 利用率
+
+---
+
+## Phase 3.5: ASR + OCR 交叉验证 📋
+
+### 问题
+纯 OCR 在纪录片/新闻类视频中噪音太大——画面里的日期、水印、社交账号、新闻标题等全被识别为"字幕"。即使 cropBottom + 文本过滤后，仍无法区分子幕与画面文字。但 ASR 准确度高（large-v3 在 7900XTX 上 ~20s/30min视频），只是无法捕获无声字幕。
+
+### 方案: ASR 为主，OCR 为辅
+
+```
+用户选 "OCR 硬字幕" 策略
+    ↓
+同时启动两条管线:
+    ├─ ASR: 下载视频 → 提取音频 → whisper large-v3 转录
+    └─ OCR: ffmpeg 抽帧 → pHash 去重 → RapidOCR 识别
+    ↓
+交叉验证:
+    对 OCR 的每个 segment，与 ASR segments 做滑动窗口语义比对
+    ├─ 匹配 (相似度 > 阈值) → 高置信度，以 ASR 文本为准
+    ├─ OCR 独有 → 丢弃（大概率画面噪音）
+    └─ ASR 独有 → 保留（正常，不是所有字幕都在画面上）
+    ↓
+输出: 以 ASR 为主体的干净 transcript，OCR 验证标记
 ```
 
-### 验收标准
-1. 对已知有硬字幕的视频（如 B站 老视频），选择 "OCR" 策略能成功提取字幕文本
-2. 提取的文本存入 `article/{title}/`，文件名与 ASR 模式一致
-3. OCR 进度显示在 UI 进度条上
-4. 取消时能 kill ffmpeg + Python 进程
-5. OCR 输出的 transcript 能被 Phase 2 LLM 分析正常处理
+### 实现细节
+
+**语义比对**: 不需要 LLM，用简单的文本相似度即可：
+- 对 OCR segment 的文本，在 ASR 时间窗口 ±3s 内找匹配
+- 相似度计算: Jaccard 相似度（字符级）或编辑距离
+- 阈值可调，默认 0.5
+
+**交互流程修改** (strategy = `'ocr'` 时):
+```
+当前: 只跑 OCR → transcript → LLM 分析
+改为: 并行跑 ASR + OCR → 交叉比对 → 合并 transcript → LLM 分析
+```
+
+**进度条**: OCR 阶段新增子阶段 `cross-validating`，进度范围 70-90%
+
+### 修改文件
+
+| 文件 | 改动 |
+|------|------|
+| `src/main/modules/analysis-pipeline.ts` | OCR 分支内改为并行启动 ASR+OCR，增加 `crossValidate()` 调用 |
+| `src/main/modules/ocr-extractor.ts` | 无需改动（OCR 输出接口不变） |
+| `src/main/modules/transcriber.ts` | 无需改动（ASR 接口不变） |
+
+### 核心函数签名
+
+```typescript
+// 新增: 交叉验证函数 (放在 analysis-pipeline.ts 或新文件 cross-validator.ts)
+function crossValidate(
+  asrSegments: WhisperSegment[],
+  ocrSegments: OcrSegment[],
+  threshold: number = 0.5
+): {
+  merged: TranscriptSegment[]     // 以 ASR 为主的最终结果
+  stats: {
+    asrOnly: number               // 仅 ASR 有 (保留)
+    ocrOnly: number               // 仅 OCR 有 (丢弃)
+    matched: number               // 双源匹配 (高置信)
+  }
+}
+```
+
+### 预期效果
+- 解决纯 OCR 噪音问题 → transcript 准确度接近纯 ASR
+- OCR 发挥辅助作用 → 匹配到的片段标记为"双源验证"
+- 用户无感知 → 策略仍叫 "OCR 硬字幕"，但实际内部是融合模式
+
+### 验证方法
+1. 对已知有硬字幕的视频运行 → transcript 应与 ASR 结果高度一致
+2. 对纯旁白视频（无字幕）运行 → OCR 结果几乎全被丢弃，最终等同纯 ASR
+3. 检查 stats 输出: `{asrOnly: 45, ocrOnly: 120, matched: 8}` → 说明 OCR 噪音多
 
 ---
 
 ## Phase 4: 优化 📋
 
+- Prompt Preset Router: auto-classify transcript genre and route to genre-specific prompts/outlines. See `phase2-llm-analysis.md` section "Proposed: Prompt Preset Router".
 - whisper-server 常驻模式 (见 `whisper-optimization.md`)
 - 批量分析
 - 跨视频问答/RAG

@@ -7,8 +7,7 @@ import { spawn, type ChildProcess } from 'child_process'
 import * as fs from 'fs/promises'
 import * as os from 'os'
 import { join } from 'path'
-import { app } from 'electron'
-import { getBinaryPath } from './utils'
+import { getBinaryPath, getModelDir } from './utils'
 import iconv from 'iconv-lite'
 
 // ===== 类型 =====
@@ -37,12 +36,7 @@ export interface TranscriberResult {
 // ===== 模型路径 =====
 
 function getModelPath(model: string): string {
-  // 打包后: resources/bin/models/ggml-small.bin
-  // 开发中: resources/bin/models/ggml-small.bin
-  const basePath = app.isPackaged
-    ? join(process.resourcesPath, 'bin', 'models')
-    : join(app.getAppPath(), 'resources', 'bin', 'models')
-  return join(basePath, `ggml-${model}.bin`)
+  return join(getModelDir(), `ggml-${model}.bin`)
 }
 
 // ===== 转写 =====
@@ -61,8 +55,14 @@ export async function transcribe(
     throw new Error('whisper-cli.exe 未找到，请将其放到 resources/bin/ 目录')
   }
   try { await fs.stat(modelPath) } catch {
+    // 确保模型目录存在
+    const modelDir = getModelDir()
+    try { await fs.mkdir(modelDir, { recursive: true }) } catch {}
     throw new Error(
-      `模型文件不存在: ${modelPath}\n请从 https://huggingface.co/ggerganov/whisper.cpp 下载 ggml-${model}.bin`
+      `模型文件不存在:\n  ${modelPath}\n\n` +
+      `请从 https://huggingface.co/ggerganov/whisper.cpp 下载 ggml-${model}.bin\n` +
+      `放到: ${modelDir}\n\n` +
+      `推荐模型: ggml-medium.bin (1.5GB, 精度高) 或 ggml-small.bin (466MB, 速度快)`
     )
   }
 

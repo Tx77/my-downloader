@@ -54,7 +54,7 @@ interface AnalysisResultPayload {
   id: string
   title: string
   url: string
-  subtitleSource: 'external' | 'asr' | 'none'
+  subtitleSource: 'external' | 'asr' | 'ocr' | 'none'
   transcript: {
     fullText: string
     segments: { start: number; end: number; text: string }[]
@@ -130,7 +130,7 @@ declare global {
         url: string
         savePath: string
         sessData?: string
-        strategy?: 'subtitle-first' | 'asr-only'
+        strategy?: 'subtitle-first' | 'asr-only' | 'ocr'
         model?: 'tiny' | 'base' | 'small' | 'medium' | 'large-v3'
         language?: string
         llmProvider?: LLMProvider

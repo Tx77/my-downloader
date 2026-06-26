@@ -54,7 +54,8 @@ wmic path win32_VideoController get name
 | `models/ggml-small.bin` | 466 MB | small 模型 (快速, 精度一般) |
 | `models/ggml-medium.bin` | 1.5 GB | **medium 模型 (推荐, 默认)** |
 
-> 模型文件最大，不上传 Git。从 [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp) 下载。
+> 模型文件不打包进安装包。开发时放在 `resources/bin/models/`，安装后的 app 从 `%APPDATA%/my-downloader/whisper-models/` 读取。
+> 下载: [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp)
 
 ### CPU 备用
 

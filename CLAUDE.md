@@ -5,6 +5,7 @@
 - **包管理**: pnpm
 - **构建**: electron-vite + electron-builder
 - **核心二进制**: yt-dlp.exe, ffmpeg.exe, ffprobe.exe, whisper-cli.exe (bundled in `resources/bin/`)
+- **Python 依赖**: rapidocr, onnxruntime-directml, numpy<2 (OCR 模块)
 
 ## 项目结构
 ```
@@ -19,8 +20,9 @@ src/
 │       ├── utils.ts               # 二进制路径/代理配置 — DO NOT TOUCH
 │       ├── audio-extractor.ts     # ffmpeg 音频提取 (16kHz WAV)
 │       ├── transcriber.ts         # whisper.cpp ASR (Vulkan GPU)
+│       ├── ocr-extractor.ts       # [NEW] OCR 硬字幕提取 (RapidOCR + DirectML)
 │       ├── content-analyzer.ts    # LLM 分析 (Prompt/Provider/文章生成)
-│       └── analysis-pipeline.ts   # 分析流水线编排 (URL+已有文本)
+│       └── analysis-pipeline.ts   # 分析流水线编排 (URL+已有文本+OCR)
 ├── preload/
 │   └── index.ts                   # contextBridge API
 └── renderer/
@@ -28,9 +30,14 @@ src/
         ├── App.tsx                # 主界面 (下载/访谈/视频分析)
         ├── env.d.ts               # 渲染进程类型声明 (新 API 类型加这里!)
         └── components/
-            ├── VideoAnalysisPanel/ # 视频分析面板 (URL分析+已有文本+LLM设置)
+            ├── VideoAnalysisPanel/ # 视频分析面板 (URL分析+已有文本+LLM设置+策略选择)
             ├── AnalysisResultCard/ # 分析结果子组件 (摘要/要点/思维导图)
             └── ...
+resources/
+├── bin/                           # 二进制 (whisper-cli, ffmpeg, yt-dlp)
+│   └── models/                    # Whisper 模型 (large-v3 ~3GB, medium ~1.5GB)
+└── ocr/
+    └── ocr_worker.py              # [NEW] RapidOCR Python worker (stdin/stdout JSON)
 ```
 
 ## 已实现功能
@@ -42,51 +49,69 @@ src/
 - 并发下载控制 (1-10)
 - 下载后打开文件夹/删除本地文件
 
-### 视频分析模块 (Phase 1 + Phase 2 ✅)
+### 视频分析模块
 
-**Phase 1 — 转录生成:**
+**Phase 1 — 转录生成 ✅:**
 - ffmpeg 提取 16kHz 单声道 WAV
 - whisper.cpp ASR, Vulkan GPU 加速 (AMD 7900XTX)
+- 支持模型: large-v3 (最准 ~3GB), medium (~1.5GB)
 - 策略: subtitle-first (优先外挂字幕, 否则下载+ASR)
 - 5 阶段进度: 获取信息→下载→提取音频→转录→分析
 - 全进程追踪取消 (yt-dlp + ffmpeg + whisper, 无孤儿进程)
 - 输出: `{savePath}/article/{title}/` (transcript.txt / transcript.json / README.md / analysis.md / analysis.prompt.md / analysis.json)
 
-**Phase 2 — LLM 深度分析:**
+**Phase 2 — LLM 深度分析 ✅:**
 - Provider: DeepSeek (默认), OpenAI-compatible, Codex CLI
 - 两阶段分析: 先按 chunk 提取结构化素材 ([FC]/[OP]/[SP]/[RT] 标记), 再合成深度文章
 - 广告/赞助内容自动过滤
 - 文章含: 结论/内容概览/论证主线/事实数字表/事实观点拆分/修辞分析/可信度五维评分/追问/速读
 - 输出: analysis.md (主阅读文件), analysis.prompt.md (Prompt 审计), analysis.json (结构化缓存)
-- 支持 URL 分析和已有文本文件夹分析
-- API Key: `.env` fallback + UI 输入 + 勾选保存才持久化
 
-**GUI 改进:**
-- 分析日志实时推送到左侧 CLI 面板
-- 统一顶层 Tab: 分析文章/摘要/要点/思维导图/转录文本
-- 单滚动条, 不嵌套
-- Markdown 渲染分析文章
-- 完成提示紧凑化 + 文件路径可折叠
+**Phase 3 — OCR 硬字幕提取 🔧 (进行中):**
+- 引擎: RapidOCR v3 (ONNX Runtime + DirectML, 替代原计划的 PaddleOCR)
+- 流程: ffmpeg 抽帧(fps=1, cropBottom=底部1/3) → pHash 去重(纯TS实现) → 批量 JSON 协议发 Python worker → 文本过滤 → 时间轴合并
+- GPU: DirectML 供 AMD 7900XTX, 需 monkey-patch RapidOCR 的 `is_dml_available()`
+- 进度: 7 阶段 (抽帧→去重→加载→识别→合并→过滤→完成)
+- 已知限制: 新闻/纪录片类视频画面文字多，非字幕文本干扰大；GPU 利用率低(模型小)
+- 依赖: `pip install rapidocr onnxruntime-directml "numpy<2"`
 
 ## 关键架构模式
 - **二进制执行**: `spawn(getBinaryPath('tool'), args)` — 统一模式
 - **IPC**: `ipcMain.handle` (请求-响应) + `webContents.send` (推送)
 - **状态持久化**: `electron-store`
-- **进程追踪**: `Set<ChildProcess>` + `processSet` 参数传递
+- **进程追踪**: `Set<ChildProcess>` + `processSet` 参数传递, 取消时 `taskkill /T /F`
 - **路径**: `app.isPackaged` 区分 dev/packaged
+- **Python 子进程**: stdin/stdout JSON 行协议, 单帧/批量两种模式
 
-## 下一步 (Phase 3)
+## 下一步 (Phase 3.5)
 
-OCR 硬字幕提取 — 当外挂字幕和 ASR 都不可用时，通过 ffmpeg 抽帧 + PaddleOCR 识别视频中烧录的文字。
+**ASR + OCR 交叉验证** — 解决纯 OCR 噪音多的问题。
+
+方案: ASR 为主, OCR 为辅。跑 ASR 转录后, 用 OCR 文本做交叉校验。匹配的部分双源确认高置信度, OCR 独有的丢弃(大概率画面噪音), ASR 独有的保留。
 
 详见 `.claude/skills/video-analysis/plan.md`
 
 ## 踩过的坑 (Gotchas)
 
 1. **取消逻辑**: 所有 spawn 进程必须注册到 `processSet`, 否则取消时变孤儿进程 CPU 100%
-2. **线程数**: whisper `-t` 用物理核数 (7950X=16), 不是逻辑核数
-3. **模型加载**: 无进度回调, medium 模型 GPU 加载 ~8-10s
-4. **输出编码**: Windows 下 whisper stdout 用 `iconv-lite` cp936 解码
+2. **线程数**: whisper `-t` 用物理核数 (7950X=16), 不是逻辑核数。large-v3 建议 `-t 8 -p 4`
+3. **模型加载**: 无进度回调, large-v3 GPU 加载 ~15-20s, medium ~8-10s
+4. **输出编码**: Windows 下 whisper stdout 用 `iconv-lite` cp936 解码; Python pipe 必须设 `PYTHONIOENCODING=utf-8`
 5. **类型声明**: 渲染进程类型在 `src/renderer/src/env.d.ts`, **不是** preload/index.d.ts
 6. **路径污染**: `select-folder` IPC 会写 store, 分析面板选文件夹必须用 `select-analysis-folder`
 7. **API Key**: 永远不要 log, UI 用 `type="password"`, 持久化必须用户 opt-in
+8. **numpy 版本**: `onnxruntime-directml` 要求 `numpy<2`, 升级 numpy 会导致 DLL 加载失败
+9. **RapidOCR GPU**: 内部 `use_dml` 默认 False, 需 monkey-patch `ProviderConfig.is_dml_available()`
+10. **模型下载**: huggingface 需代理, 不能用两个源续传(会导致文件损坏), 用 `hf-mirror.com` 镜像稳定
+
+## 文档维护规则
+
+当用户说 "更新 skill 文档" / "更新文档" / "sync skills" 时，**无需询问，直接执行**：
+
+1. **`CLAUDE.md`** — 如果项目结构变了（新增/删除模块）、gotchas 有新增、phase 状态变化，同步更新
+2. **`.claude/skills/video-analysis/plan.md`** — 更新 phase 状态、实现细节、新增/修改的 gotchas、下一步计划
+3. **`.claude/skills/video-analysis/README.md`** — 更新 phase 状态速览、关键文件索引、known issues
+4. **同步副本**: `cp .claude/skills/video-analysis/*.md .agents/skills/video-analysis/`
+5. **验证**: `diff .claude/skills/video-analysis/ .agents/skills/video-analysis/` 确认一致
+
+**原则**: skill 文档是给其他 agent 看的入口，不需要全量扫描代码就能理解项目。必须保持 `.claude/` 和 `.agents/` 两份完全同步。

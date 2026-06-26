@@ -24,7 +24,7 @@ interface WhisperSegment {
 
 interface AnalysisResult {
   id: string; title: string; url: string
-  subtitleSource: 'external' | 'asr' | 'none'
+  subtitleSource: 'external' | 'asr' | 'ocr' | 'none'
   transcript: { fullText: string; segments: WhisperSegment[]; language: string; processingTime: number }
   outputFiles: { txt: string; json: string; readme?: string; analysisMd?: string; promptMd?: string }
   savePath: string
@@ -56,13 +56,14 @@ interface Props {
   onLog?: (message: string) => void
 }
 
-const STAGES = ['fetching-info', 'downloading', 'extracting-audio', 'transcribing', 'analyzing', 'done'] as const
+const STAGES = ['fetching-info', 'downloading', 'extracting-audio', 'transcribing', 'cross-validating', 'analyzing', 'done'] as const
 const STAGE_LABELS: Record<string, string> = {
   'checking-deps': '检查依赖',
   'fetching-info': '获取信息',
   'downloading': '下载视频',
   'extracting-audio': '提取音频',
   'transcribing': '语音识别',
+  'cross-validating': 'ASR+OCR 校验',
   'analyzing': 'AI 内容分析',
   'done': '完成'
 }
@@ -72,7 +73,7 @@ type ResultTab = 'article' | 'summary' | 'key-points' | 'mind-map' | 'transcript
 export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.Element {
   const log = (msg: string) => { onLog?.(msg) }
   const [url, setUrl] = useState('')
-  const [strategy, setStrategy] = useState<'subtitle-first' | 'asr-only'>('subtitle-first')
+  const [strategy, setStrategy] = useState<'asr-only' | 'ocr'>('asr-only')
   const [model, setModel] = useState<'tiny' | 'base' | 'small' | 'medium' | 'large-v3'>('medium')
   const [language, setLanguage] = useState('zh')
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -134,7 +135,7 @@ export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.El
           setError(data.error)
           log(`❌ 分析失败: ${data.error}`)
         } else {
-          log(`✅ 分析完成: ${data.title} · ${data.transcript.segments.length}段 · ${data.subtitleSource === 'external' ? '外挂字幕' : 'GPU ASR'}`)
+          log(`✅ 分析完成: ${data.title} · ${data.transcript.segments.length}段 · ${data.subtitleSource === 'external' ? '外挂字幕' : data.subtitleSource === 'ocr' ? 'ASR+OCR 校验' : 'GPU ASR'}`)
           if (data.llmProvider) log(`  LLM: ${data.llmProvider}/${data.llmModel}`)
           setResult(data)
           // Load analysis.md content
@@ -450,18 +451,15 @@ export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.El
         <div className="control-group">
           <label>策略</label>
           <select value={strategy} onChange={(e) => setStrategy(e.target.value as any)} disabled={analyzing}>
-            <option value="subtitle-first">字幕优先</option>
-            <option value="asr-only">纯 ASR</option>
+            <option value="asr-only">ASR 转录</option>
+            <option value="ocr">ASR+OCR 交叉验证</option>
           </select>
         </div>
         <div className="control-group">
           <label>模型</label>
           <select value={model} onChange={(e) => setModel(e.target.value as any)} disabled={analyzing}>
-            <option value="medium">medium (推荐)</option>
-            <option value="large-v3">large-v3 (最准)</option>
-            <option value="small">small</option>
-            <option value="base">base</option>
-            <option value="tiny">tiny (最快)</option>
+            <option value="large-v3">large-v3 (最准 ~3GB)</option>
+            <option value="medium">medium (推荐 ~1.5GB)</option>
           </select>
         </div>
         <div className="control-group">
@@ -637,7 +635,7 @@ export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.El
             <strong>分析完成</strong>
             <span className="completion-meta">
               · {result.transcript.segments.length} 段
-              · {result.subtitleSource === 'external' ? '外挂字幕' : 'GPU 语音识别'}
+              · {result.subtitleSource === 'external' ? '外挂字幕' : result.subtitleSource === 'ocr' ? 'ASR+OCR 校验' : 'GPU 语音识别'}
               {result.llmProvider && <> · {result.llmProvider} / {result.llmModel}</>}
             </span>
           </div>
@@ -700,7 +698,7 @@ export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.El
             <div className="result-title-row">
               <span className="result-title">{result.title}</span>
               <span className={`result-badge ${result.subtitleSource === 'asr' ? 'asr' : ''}`}>
-                {result.subtitleSource === 'external' ? '📝 字幕' : '🎙 GPU ASR'} · {model}
+                {result.subtitleSource === 'external' ? '📝 字幕' : result.subtitleSource === 'ocr' ? '🔍 ASR+OCR 校验' : '🎙 GPU ASR'} · {model}
               </span>
             </div>
             <div className="result-actions">

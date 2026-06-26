@@ -1,9 +1,9 @@
-/**
- * 视频分析流水线 — 编排 下载→提取→转录 流程
+﻿/**
+ * 瑙嗛鍒嗘瀽娴佹按绾?鈥?缂栨帓 涓嬭浇鈫掓彁鍙栤啋杞綍 娴佺▼
  *
- * 策略:
- *   subtitle-first: 优先外挂字幕, 没有则下载视频做 ASR
- *   asr-only:       下载视频 → 提取音频 → 转录
+ * 绛栫暐:
+ *   subtitle-first: 浼樺厛澶栨寕瀛楀箷, 娌℃湁鍒欎笅杞借棰戝仛 ASR
+ *   asr-only:       涓嬭浇瑙嗛 鈫?鎻愬彇闊抽 鈫?杞綍
  */
 
 import { BrowserWindow, ipcMain } from 'electron'
@@ -15,6 +15,7 @@ import { getBinaryPath, getProxyArgs } from './utils'
 import { createCookieFile, cleanupCookieFile } from './cookie'
 import { extractAudio } from './audio-extractor'
 import { transcribe, checkWhisperDeps, type TranscriberResult } from './transcriber'
+import { extractSubtitles, type OcrSegment } from './ocr-extractor'
 import {
   askQuestion,
   analyzeTranscript,
@@ -29,14 +30,14 @@ import iconv from 'iconv-lite'
 
 const store = new Store()
 
-// ===== 类型 =====
+// ===== 绫诲瀷 =====
 
 export interface AnalysisRequest {
   id: string
   url: string
   savePath: string
   sessData?: string
-  strategy?: 'subtitle-first' | 'asr-only'
+  strategy?: 'subtitle-first' | 'asr-only' | 'ocr'
   model?: 'tiny' | 'base' | 'small' | 'medium' | 'large-v3'
   language?: string
   llmProvider?: LLMProvider
@@ -52,6 +53,7 @@ export type AnalysisStage =
   | 'downloading'
   | 'extracting-audio'
   | 'transcribing'
+  | 'cross-validating'
   | 'analyzing'
   | 'done'
 
@@ -61,7 +63,7 @@ export interface AnalysisProgress {
   percent: number
   overallPercent: number
   message: string
-  /** 已耗时 (秒) */
+  /** 宸茶€楁椂 (绉? */
   elapsed: number
 }
 
@@ -69,9 +71,9 @@ export interface AnalysisResult {
   id: string
   title: string
   url: string
-  subtitleSource: 'external' | 'asr' | 'none'
+  subtitleSource: 'external' | 'asr' | 'ocr' | 'none'
   transcript: TranscriberResult
-  /** 输出文件路径 */
+  /** 杈撳嚭鏂囦欢璺緞 */
   outputFiles: {
     txt: string
     json: string
@@ -79,7 +81,7 @@ export interface AnalysisResult {
     analysisMd?: string
     promptMd?: string
   }
-  /** 文件保存目录 */
+  /** 鏂囦欢淇濆瓨鐩綍 */
   savePath: string
   summary?: AnalysisResults['summary']
   keyPoints?: AnalysisResults['keyPoints']
@@ -108,7 +110,7 @@ export interface ExistingAnalysisRequest {
   language?: string
 }
 
-// ===== 进程追踪 (修复取消bug: 之前只追踪yt-dlp, 漏了ffmpeg和whisper) =====
+// ===== 杩涚▼杩借釜 (淇鍙栨秷bug: 涔嬪墠鍙拷韪獃t-dlp, 婕忎簡ffmpeg鍜寃hisper) =====
 
 const activeTasks = new Map<string, Set<ChildProcess>>()
 const completedAnalyses = new Map<string, { result: AnalysisResult; request: AnalysisRequest }>()
@@ -202,8 +204,7 @@ async function saveAnalysisFiles(
   const jsonPath = join(articleDir, 'transcript.json')
   const readmePath = join(articleDir, 'README.md')
 
-  // 纯文本
-  await fs.writeFile(txtPath, transcript.fullText, 'utf8')
+  // 绾枃鏈?  await fs.writeFile(txtPath, transcript.fullText, 'utf8')
 
   // JSON
   await fs.writeFile(jsonPath, JSON.stringify({
@@ -228,15 +229,15 @@ async function saveAnalysisFiles(
     `# ${videoInfo.title}`,
     '',
     `- **URL**: ${videoInfo.url}`,
-    `- **分析时间**: ${nowUTC8()} (UTC+8)`,
-    `- **字幕来源**: ${subtitleSource === 'external' ? '外挂字幕' : 'GPU 语音识别 (ASR)'}`,
-    `- **模型**: ggml-${model}.bin (Vulkan GPU)`,
-    `- **语言**: ${language}`,
-    `- **时长**: ${duration}`,
-    `- **分段数**: ${transcript.segments.length}`,
-    `- **处理耗时**: ${(transcript.processingTime / 1000).toFixed(0)}s`,
+    `- **鍒嗘瀽鏃堕棿**: ${nowUTC8()} (UTC+8)`,
+    `- **Subtitle Source**: ${subtitleSource === 'external' ? 'external subtitles' : subtitleSource === 'ocr' ? 'ASR+OCR cross-validation' : 'GPU ASR'}`,
+    `- **妯″瀷**: ggml-${model}.bin (Vulkan GPU)`,
+    `- **璇█**: ${language}`,
+    `- **鏃堕暱**: ${duration}`,
+    `- **鍒嗘鏁?*: ${transcript.segments.length}`,
+    `- **澶勭悊鑰楁椂**: ${(transcript.processingTime / 1000).toFixed(0)}s`,
     '',
-    '## 转录文本',
+    '## 杞綍鏂囨湰',
     '',
     transcript.fullText,
     ''
@@ -254,7 +255,7 @@ function formatDuration(ms: number): string {
   return `${m}:${String(s).padStart(2, '0')}`
 }
 
-// ===== 流水线核心 =====
+// ===== 娴佹按绾挎牳蹇?=====
 
 function toAnalyzerSegments(transcript: TranscriberResult): AnalyzerTranscriptSegment[] {
   return transcript.segments.map((segment) => ({
@@ -283,11 +284,11 @@ async function appendAnalysisToReadme(readmePath: string, results: AnalysisResul
   const lines: string[] = []
 
   if (results.summary) {
-    lines.push('', '## AI 摘要', '', results.summary.text.trim(), '')
+    lines.push('', '## AI 鎽樿', '', results.summary.text.trim(), '')
   }
 
   if (results.keyPoints?.length) {
-    lines.push('', '## 关键要点', '')
+    lines.push('', '## 鍏抽敭瑕佺偣', '')
     for (const point of results.keyPoints) {
       lines.push(`- **[${formatSeconds(point.timestamp)}] ${point.title}**: ${point.description}`)
     }
@@ -295,7 +296,7 @@ async function appendAnalysisToReadme(readmePath: string, results: AnalysisResul
   }
 
   if (results.mindMap) {
-    lines.push('', '## 思维导图', '')
+    lines.push('', '## 鎬濈淮瀵煎浘', '')
     appendMindMapLines(lines, results.mindMap, 0)
     lines.push('')
   }
@@ -322,11 +323,11 @@ async function writeReadableAnalysisFiles(
   const analysisMd = join(articleDir, 'analysis.md')
   const promptMd = join(articleDir, 'analysis.prompt.md')
   const header = [
-    `# ${title}｜视频内容分析`,
+    `# ${title} - Video Analysis`,
     '',
     `- **LLM Provider**: ${llm.provider}`,
     `- **LLM Model**: ${llm.model}`,
-    `- **生成时间**: ${nowUTC8()} (UTC+8)`,
+    `- **鐢熸垚鏃堕棿**: ${nowUTC8()} (UTC+8)`,
     '',
     '---',
     ''
@@ -350,7 +351,7 @@ async function runLlmAnalysis(
   if (!analysisTypes.length) return { results: {}, provider, model: llmModel, article: '', prompt: '' }
 
   let progressTick = 0
-  emitProgress('analyzing', 0, 90, '正在进行 LLM 内容分析...')
+  emitProgress('analyzing', 0, 90, '姝ｅ湪杩涜 LLM 鍐呭鍒嗘瀽...')
 
   const results = await analyzeTranscript(
     transcript.fullText,
@@ -371,9 +372,9 @@ async function runLlmAnalysis(
     }
   )
 
-  emitProgress('analyzing', 100, 98, 'LLM 内容分析完成')
+  emitProgress('analyzing', 100, 98, 'LLM 鍐呭鍒嗘瀽瀹屾垚')
   const article = await generateAnalysisArticle(
-    request.url || '已有转录文本',
+    request.url || '宸叉湁杞綍鏂囨湰',
     transcript.fullText,
     toAnalyzerSegments(transcript),
     {
@@ -411,9 +412,149 @@ function plainTextToTranscript(text: string): TranscriberResult {
   }
 }
 
+function normalizeForMatch(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[\s\r\n\t]+/g, '')
+    .replace(/[.,!?;:'"`~，。！？；：“”‘’、（）()[\]{}<>《》【】|/\\_-]/g, '')
+}
+
+function charSetSimilarity(a: string, b: string): number {
+  const left = new Set([...a])
+  const right = new Set([...b])
+  if (!left.size || !right.size) return 0
+
+  let intersection = 0
+  for (const ch of left) {
+    if (right.has(ch)) intersection += 1
+  }
+  return intersection / (left.size + right.size - intersection)
+}
+
+function editSimilarity(a: string, b: string): number {
+  if (!a && !b) return 1
+  if (!a || !b) return 0
+
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i)
+  const curr = new Array<number>(b.length + 1)
+
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      )
+    }
+    for (let j = 0; j <= b.length; j++) prev[j] = curr[j]
+  }
+
+  return 1 - prev[b.length] / Math.max(a.length, b.length)
+}
+
+function textSimilarity(a: string, b: string): number {
+  const left = normalizeForMatch(a)
+  const right = normalizeForMatch(b)
+  if (!left || !right) return 0
+  if (left.includes(right) || right.includes(left)) {
+    return Math.min(left.length, right.length) / Math.max(left.length, right.length)
+  }
+  return Math.max(charSetSimilarity(left, right), editSimilarity(left, right))
+}
+
+function shouldUseOcrCorrection(asrText: string, ocrText: string, score: number): boolean {
+  if (score < 0.78) return false
+
+  const asr = normalizeForMatch(asrText)
+  const ocr = normalizeForMatch(ocrText)
+  if (!asr || !ocr) return false
+
+  const lengthRatio = ocr.length / asr.length
+  if (lengthRatio < 0.6 || lengthRatio > 1.6) return false
+  if (/https?:\/\/|www\.|\.com|\.cn|\.jp|\.html|\.co\.jp/i.test(ocrText)) return false
+  if (/^@\w+/.test(ocrText.trim())) return false
+
+  const badChars = (ocrText.match(/�|锟/g) || []).length
+  if (badChars > ocrText.length * 0.1) return false
+
+  const asrUsefulChars = (asrText.match(/[\p{Script=Han}\p{Letter}\p{Number}]/gu) || []).length
+  const ocrUsefulChars = (ocrText.match(/[\p{Script=Han}\p{Letter}\p{Number}]/gu) || []).length
+  return ocrUsefulChars >= asrUsefulChars
+}
+
+function crossValidate(
+  asrSegments: TranscriberResult['segments'],
+  ocrSegments: OcrSegment[],
+  threshold = 0.5,
+  windowMs = 3000
+): {
+  merged: TranscriberResult['segments']
+  stats: { asrOnly: number; ocrOnly: number; matched: number; corrected: number }
+} {
+  const merged = asrSegments.map((segment) => ({ ...segment }))
+  const matchedAsrIndexes = new Set<number>()
+  let matched = 0
+  let ocrOnly = 0
+  let corrected = 0
+
+  for (const ocr of ocrSegments) {
+    const candidates = asrSegments
+      .map((segment, index) => ({ segment, index }))
+      .filter(({ segment }) => segment.end >= ocr.start - windowMs && segment.start <= ocr.end + windowMs)
+
+    const windowText = candidates.map(({ segment }) => segment.text).join('')
+    let bestScore = textSimilarity(ocr.text, windowText)
+    let bestIndex = candidates[0]?.index ?? -1
+
+    for (const candidate of candidates) {
+      const score = textSimilarity(ocr.text, candidate.segment.text)
+      if (score > bestScore) {
+        bestScore = score
+        bestIndex = candidate.index
+      }
+    }
+
+    if (bestScore >= threshold && bestIndex >= 0) {
+      matched += 1
+      matchedAsrIndexes.add(bestIndex)
+      if (shouldUseOcrCorrection(merged[bestIndex].text, ocr.text, bestScore)) {
+        merged[bestIndex].text = ocr.text.trim()
+        corrected += 1
+      }
+    } else {
+      ocrOnly += 1
+    }
+  }
+
+  return {
+    merged,
+    stats: {
+      asrOnly: Math.max(0, asrSegments.length - matchedAsrIndexes.size),
+      ocrOnly,
+      matched,
+      corrected
+    }
+  }
+}
+
+function isReadableTranscript(transcript: TranscriberResult): boolean {
+  const text = transcript.fullText.replace(/\s+/g, '')
+  if (text.length < 20 || transcript.segments.length === 0) return false
+
+  const badChars = (text.match(/锟絴閿焲脙|脗|盲|氓|忙|莽|猫|茅|矛|铆|卯|茂|冒|帽|貌|贸|么|玫|枚/g) || []).length
+  if (badChars > text.length * 0.08) return false
+
+  const readableChars = (text.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Letter}\p{Number}]/gu) || []).length
+  if (readableChars / text.length < 0.55) return false
+
+  const avgSegmentLength = text.length / Math.max(transcript.segments.length, 1)
+  return avgSegmentLength >= 2
+}
+
 function extractTranscriptFromReadme(content: string): string {
   const lines = content.replace(/\r/g, '').split('\n')
-  const start = lines.findIndex((line) => /^##\s+/.test(line) && /(转录文本|Transcript|transcript)/i.test(line))
+  const start = lines.findIndex((line) => /^##\s+/.test(line) && /(杞綍鏂囨湰|Transcript|transcript)/i.test(line))
   if (start < 0) return ''
 
   const collected: string[] = []
@@ -428,7 +569,7 @@ async function readExistingTranscript(candidatePath: string): Promise<string> {
   const content = await fs.readFile(candidatePath, 'utf8')
   if (basename(candidatePath).toLowerCase() === 'readme.md') {
     const transcript = extractTranscriptFromReadme(content)
-    if (!transcript) throw new Error('README.md 中没有找到“## 转录文本”或“## Transcript”段落。')
+    if (!transcript) throw new Error('README.md does not contain a transcript section.')
     return transcript
   }
   return content.trim()
@@ -464,19 +605,19 @@ async function runExistingFolderAnalysis(
     sendProgress(mainWindow, { id: request.id, stage, percent, overallPercent, message, elapsed })
   }
 
-  emitProgress('fetching-info', 0, 5, '正在读取已有转录文件...')
+  emitProgress('fetching-info', 0, 5, '姝ｅ湪璇诲彇宸叉湁杞綍鏂囦欢...')
   const candidates = await listExistingTranscriptCandidates(request.folderPath)
   if (!candidates.length) {
-    throw new Error('未找到候选转录文件。请使用 transcript.txt、transcript.md、transcript.llm.md，或包含“## 转录文本”的 README.md。')
+    throw new Error('No transcript candidate found. Use transcript.txt, transcript.md, transcript.llm.md, or README.md with a transcript section.')
   }
 
   const selected = request.transcriptPath
     ? candidates.find((candidate) => candidate.path === request.transcriptPath)
     : candidates[0]
-  if (!selected) throw new Error('选择的转录文件不在当前文件夹候选列表中。')
+  if (!selected) throw new Error('Selected transcript file is not in the candidate list.')
 
   const text = await readExistingTranscript(selected.path)
-  if (!text.trim()) throw new Error('转录文本为空，无法分析。')
+  if (!text.trim()) throw new Error('Transcript text is empty.')
 
   const transcript = plainTextToTranscript(text)
   const title = basename(request.folderPath)
@@ -484,7 +625,7 @@ async function runExistingFolderAnalysis(
   const txtPath = selected.path
   const jsonPath = join(request.folderPath, 'analysis.json')
 
-  emitProgress('fetching-info', 100, 10, `已读取 ${selected.name}`)
+  emitProgress('fetching-info', 100, 10, `宸茶鍙?${selected.name}`)
   const analysisRequest: AnalysisRequest = {
     id: request.id,
     url: '',
@@ -501,7 +642,7 @@ async function runExistingFolderAnalysis(
   try {
     await fs.access(readmePath)
   } catch {
-    await fs.writeFile(readmePath, [`# ${title}`, '', '## 转录文本', '', text, ''].join('\n'), 'utf8')
+    await fs.writeFile(readmePath, [`# ${title}`, '', '## 杞綍鏂囨湰', '', text, ''].join('\n'), 'utf8')
   }
 
   await appendAnalysisToReadme(readmePath, llm.results)
@@ -516,7 +657,7 @@ async function runExistingFolderAnalysis(
   }, null, 2), 'utf8')
 
   killAllProcesses(request.id)
-  emitProgress('done', 100, 100, `已有文本分析完成，已追加到 ${readmePath}`)
+  emitProgress('done', 100, 100, `宸叉湁鏂囨湰鍒嗘瀽瀹屾垚锛屽凡杩藉姞鍒?${readmePath}`)
 
   return {
     id: request.id,
@@ -538,7 +679,7 @@ async function runPipeline(
   mainWindow: BrowserWindow,
   request: AnalysisRequest
 ): Promise<AnalysisResult> {
-  const { id, url, savePath, sessData, strategy = 'subtitle-first', model = 'medium', language = 'zh' } = request
+  const { id, url, savePath, sessData, strategy = 'asr-only', model = 'medium', language = 'zh' } = request
   const pipelineStart = Date.now()
 
   const emitProgress = (stage: AnalysisStage, percent: number, overallPercent: number, message: string) => {
@@ -546,8 +687,8 @@ async function runPipeline(
     sendProgress(mainWindow, { id, stage, percent, overallPercent, message, elapsed })
   }
 
-  // === Step 1: 获取视频信息 ===
-  emitProgress('fetching-info', 0, 5, '正在获取视频信息...')
+  // === Step 1: 鑾峰彇瑙嗛淇℃伅 ===
+  emitProgress('fetching-info', 0, 5, '姝ｅ湪鑾峰彇瑙嗛淇℃伅...')
 
   const cookieFilePath = createCookieFile(sessData || '')
 
@@ -570,7 +711,7 @@ async function runPipeline(
 
     proc.on('close', (code) => {
       cleanupCookieFile(cookieFilePath)
-      if (code !== 0) return reject(new Error(`获取视频信息失败: ${stderr.slice(-200)}`))
+      if (code !== 0) return reject(new Error(`鑾峰彇瑙嗛淇℃伅澶辫触: ${stderr.slice(-200)}`))
 
       try {
         const json = JSON.parse(stdout)
@@ -579,32 +720,33 @@ async function runPipeline(
           (json.automatic_captions && Object.keys(json.automatic_captions).length > 0)
         )
         resolve({
-          title: json.title || '未知标题',
+          title: json.title || '鏈煡鏍囬',
           duration: json.duration || 0,
           hasSubtitles
         })
       } catch (e) {
-        reject(new Error(`解析视频信息失败: ${(e as Error).message}`))
+        reject(new Error(`瑙ｆ瀽瑙嗛淇℃伅澶辫触: ${(e as Error).message}`))
       }
     })
 
-    proc.on('error', (err) => reject(new Error(`无法启动 yt-dlp: ${err.message}`)))
+    proc.on('error', (err) => reject(new Error(`鏃犳硶鍚姩 yt-dlp: ${err.message}`)))
   })
 
-  emitProgress('fetching-info', 100, 10, `视频: ${videoInfo.title}`)
+  emitProgress('fetching-info', 100, 10, `瑙嗛: ${videoInfo.title}`)
 
-  // === Step 2: 尝试外挂字幕 (subtitle-first 策略) ===
+  // === Step 2: 灏濊瘯澶栨寕瀛楀箷 (subtitle-first 绛栫暐) ===
   let subtitleResult: TranscriberResult | null = null
+  let effectiveStrategy = strategy
 
-  if (strategy === 'subtitle-first' && videoInfo.hasSubtitles) {
-    emitProgress('downloading', 0, 15, '检测到外挂字幕, 尝试下载...')
+  if (videoInfo.hasSubtitles) {
+    emitProgress('downloading', 0, 15, '妫€娴嬪埌澶栨寕瀛楀箷, 灏濊瘯涓嬭浇...')
 
     try {
       subtitleResult = await downloadAndParseSubtitles(id, url, savePath, sessData, (msg) => {
         emitProgress('downloading', 50, 20, msg)
       })
 
-      if (subtitleResult) {
+      if (subtitleResult && isReadableTranscript(subtitleResult)) {
         killAllProcesses(id)
 
         const safeTitle = safeFilename(videoInfo.title)
@@ -616,7 +758,7 @@ async function runPipeline(
         await mergeAnalysisIntoJson(files.json, llm.results, llm.provider, llm.model)
         const readableFiles = await writeReadableAnalysisFiles(files.articleDir, videoInfo.title, llm)
 
-        emitProgress('done', 100, 100, `字幕分析完成, 已保存到 article/${safeTitle}/`)
+        emitProgress('done', 100, 100, `瀛楀箷鍒嗘瀽瀹屾垚, 宸蹭繚瀛樺埌 article/${safeTitle}/`)
         return {
           id, title: videoInfo.title, url,
           subtitleSource: 'external',
@@ -630,14 +772,19 @@ async function runPipeline(
           llmModel: llm.model
         }
       }
-      emitProgress('downloading', 100, 25, '外挂字幕不可用, 切换到 ASR 模式')
+      if (subtitleResult) {
+        effectiveStrategy = 'asr-only'
+        emitProgress('downloading', 100, 25, 'Downloaded subtitles look garbled; falling back to ASR only')
+      } else {
+        emitProgress('downloading', 100, 25, 'No usable downloadable subtitles; continuing with selected strategy')
+      }
     } catch {
-      emitProgress('downloading', 100, 25, '字幕下载失败, 切换到 ASR 模式')
+      emitProgress('downloading', 100, 25, 'Subtitle download failed; continuing with selected strategy')
     }
   }
 
-  // === Step 3: 下载视频 ===
-  emitProgress('downloading', 0, 25, '正在下载视频...')
+  // === Step 3: 涓嬭浇瑙嗛 ===
+  emitProgress('downloading', 0, 25, '姝ｅ湪涓嬭浇瑙嗛...')
 
   const videoFilename = `analysis_${id}_video`
   const videoPath = join(savePath, `${videoFilename}.mp4`)
@@ -665,39 +812,135 @@ async function runPipeline(
       const pMatch = text.match(/(\d{1,3}(?:\.\d+)?)%/)
       if (pMatch) {
         const pct = parseFloat(pMatch[1])
-        emitProgress('downloading', pct, 25 + (pct * 0.3), `下载中 ${pct.toFixed(1)}%`)
+        emitProgress('downloading', pct, 25 + (pct * 0.3), `涓嬭浇涓?${pct.toFixed(1)}%`)
       }
     })
 
     proc.on('close', (code) => {
       cleanupCookieFile(cookieFile)
-      code === 0 ? resolve() : reject(new Error(`视频下载失败, 退出码: ${code}`))
+      code === 0 ? resolve() : reject(new Error(`瑙嗛涓嬭浇澶辫触, 閫€鍑虹爜: ${code}`))
     })
 
-    proc.on('error', (err) => reject(new Error(`无法启动 yt-dlp: ${err.message}`)))
+    proc.on('error', (err) => reject(new Error(`鏃犳硶鍚姩 yt-dlp: ${err.message}`)))
   })
 
-  emitProgress('downloading', 100, 55, '视频下载完成')
+  emitProgress('downloading', 100, 55, '瑙嗛涓嬭浇瀹屾垚')
 
-  // === Step 4: 提取音频 ===
-  emitProgress('extracting-audio', 0, 55, '正在提取音频...')
+  // === OCR 纭瓧骞曟彁鍙?(ocr 绛栫暐) ===
+  if (effectiveStrategy === 'ocr') {
+    const procSet = getProcessSet(id)
+    const audioPath = join(savePath, `analysis_${id}_audio.wav`)
+
+    emitProgress('extracting-audio', 0, 55, 'Starting ASR and OCR cross-validation...')
+
+    const asrPromise = (async () => {
+      emitProgress('extracting-audio', 0, 55, 'Extracting audio for ASR...')
+      await extractAudio(videoPath, audioPath, {
+        onProgress: (progress) => {
+          const pct = Math.round(Math.min(progress.elapsed, 60) / 60 * 10)
+          emitProgress('extracting-audio', 50, 55 + pct, `Extracting audio... ${progress.elapsed}s`)
+        },
+        processSet: procSet
+      })
+
+      emitProgress('extracting-audio', 100, 65, 'Audio extraction complete')
+      emitProgress('transcribing', 0, 65, 'Running ASR for OCR verification...')
+
+      const result = await transcribe(audioPath, {
+        model,
+        language,
+        onProgress: (pct, msg) => {
+          emitProgress('transcribing', pct, 65 + (pct * 0.2), msg)
+        },
+        processSet: procSet
+      })
+
+      emitProgress('transcribing', 100, 85, `ASR complete: ${result.segments.length} segments`)
+      return result
+    })()
+
+    const ocrPromise = extractSubtitles({
+      videoPath,
+      language,
+      fps: 1,
+      cropBottom: true,
+      onProgress: (status) => {
+        emitProgress('extracting-audio', status.phasePercent, 55 + Math.round(status.phasePercent * 0.25), status.message)
+      },
+      processSet: procSet
+    })
+
+    const [asrResult, ocrResult] = await Promise.all([asrPromise, ocrPromise])
+
+    emitProgress('cross-validating', 0, 85, 'Cross-validating ASR and OCR segments...')
+    const validation = crossValidate(asrResult.segments, ocrResult.segments)
+    const transcript: TranscriberResult = {
+      fullText: validation.merged.map((segment) => segment.text).join(' '),
+      segments: validation.merged,
+      language: asrResult.language || language,
+      processingTime: asrResult.processingTime + ocrResult.processingTime
+    }
+    emitProgress(
+      'cross-validating',
+      100,
+      90,
+      `Cross-validation complete: matched ${validation.stats.matched}, corrected ${validation.stats.corrected}, discarded OCR-only ${validation.stats.ocrOnly}, kept ASR-only ${validation.stats.asrOnly}`
+    )
+
+    const safeTitle = safeFilename(videoInfo.title)
+    const files = await saveAnalysisFiles(savePath, safeTitle,
+      { title: videoInfo.title, url },
+      'ocr', model, language, transcript)
+    const llm = await runLlmAnalysis(request, transcript, procSet, emitProgress)
+    await appendAnalysisToReadme(files.readme, llm.results)
+    await mergeAnalysisIntoJson(files.json, llm.results, llm.provider, llm.model)
+    const readableFiles = await writeReadableAnalysisFiles(files.articleDir, videoInfo.title, llm)
+
+    try { await fs.unlink(videoPath) } catch {}
+    try { await fs.unlink(audioPath) } catch {}
+    const entries = await fs.readdir(savePath).catch(() => [])
+    for (const entry of entries) {
+      if (entry.startsWith(`analysis_${id}_`)) {
+        try { await fs.unlink(join(savePath, entry)) } catch {}
+      }
+    }
+
+    killAllProcesses(id)
+    emitProgress('done', 100, 100, `OCR cross-validated analysis complete, saved to article/${safeTitle}/`)
+
+    return {
+      id, title: videoInfo.title, url,
+      subtitleSource: 'ocr',
+      transcript,
+      outputFiles: { txt: files.txt, json: files.json, readme: files.readme, ...readableFiles },
+      savePath: files.articleDir,
+      summary: llm.results.summary,
+      keyPoints: llm.results.keyPoints,
+      mindMap: llm.results.mindMap,
+      llmProvider: llm.provider,
+      llmModel: llm.model
+    }
+  }
+
+  // === Step 4: 鎻愬彇闊抽 ===
+  emitProgress('extracting-audio', 0, 55, '姝ｅ湪鎻愬彇闊抽...')
 
   const audioPath = join(savePath, `analysis_${id}_audio.wav`)
 
-  // 获取进程集合，传给 extractAudio 以便追踪
+  // 鑾峰彇杩涚▼闆嗗悎锛屼紶缁?extractAudio 浠ヤ究杩借釜
   const procSet = getProcessSet(id)
 
   await extractAudio(videoPath, audioPath, {
     onProgress: (progress) => {
-      emitProgress('extracting-audio', 50, 55 + 10, `提取音频中... 已处理 ${progress.elapsed}s`)
+      emitProgress('extracting-audio', 50, 55 + 10, `鎻愬彇闊抽涓?.. 宸插鐞?${progress.elapsed}s`)
     },
-    processSet: procSet  // ← 关键: 让 extractAudio 的 ffmpeg 进程可被取消
+    processSet: procSet  // 鈫?鍏抽敭: 璁?extractAudio 鐨?ffmpeg 杩涚▼鍙鍙栨秷
   })
 
-  emitProgress('extracting-audio', 100, 65, '音频提取完成')
+  emitProgress('extracting-audio', 100, 65, '闊抽鎻愬彇瀹屾垚')
 
-  // === Step 5: ASR 转录 ===
-  emitProgress('transcribing', 0, 65, '正在语音识别...')
+  // === Step 5: ASR 杞綍 ===
+  emitProgress('transcribing', 0, 65, '姝ｅ湪璇煶璇嗗埆...')
 
   const transcript = await transcribe(audioPath, {
     model,
@@ -705,12 +948,12 @@ async function runPipeline(
     onProgress: (pct, msg) => {
       emitProgress('transcribing', pct, 65 + (pct * 0.25), msg)
     },
-    processSet: procSet  // ← 关键: 让 transcribe 的 whisper-cli 进程可被取消
+    processSet: procSet  // 鈫?鍏抽敭: 璁?transcribe 鐨?whisper-cli 杩涚▼鍙鍙栨秷
   })
 
-  emitProgress('transcribing', 100, 90, `转录完成, ${transcript.segments.length} 个片段`)
+  emitProgress('transcribing', 100, 90, `ASR complete: ${transcript.segments.length} segments`)
 
-  // === 保存到 article/ ===
+  // === 淇濆瓨鍒?article/ ===
   const safeTitle = safeFilename(videoInfo.title)
   const files = await saveAnalysisFiles(savePath, safeTitle,
     { title: videoInfo.title, url },
@@ -720,7 +963,7 @@ async function runPipeline(
   await mergeAnalysisIntoJson(files.json, llm.results, llm.provider, llm.model)
   const readableFiles = await writeReadableAnalysisFiles(files.articleDir, videoInfo.title, llm)
 
-  // === 清理临时文件 ===
+  // === 娓呯悊涓存椂鏂囦欢 ===
   try { await fs.unlink(videoPath) } catch {}
   try { await fs.unlink(audioPath) } catch {}
   const entries = await fs.readdir(savePath).catch(() => [])
@@ -730,9 +973,9 @@ async function runPipeline(
     }
   }
 
-  // === 完成 ===
+  // === 瀹屾垚 ===
   killAllProcesses(id)
-  emitProgress('done', 100, 100, `分析完成, 已保存到 article/${safeTitle}/`)
+  emitProgress('done', 100, 100, `鍒嗘瀽瀹屾垚, 宸蹭繚瀛樺埌 article/${safeTitle}/`)
 
   return {
     id, title: videoInfo.title, url,
@@ -748,7 +991,7 @@ async function runPipeline(
   }
 }
 
-// ===== 字幕下载与解析 =====
+// ===== 瀛楀箷涓嬭浇涓庤В鏋?=====
 
 async function downloadAndParseSubtitles(
   id: string, url: string, savePath: string, sessData: string | undefined,
@@ -786,14 +1029,14 @@ async function downloadAndParseSubtitles(
       if (!subtitleFiles.length) return resolve(null)
 
       const subPath = join(savePath, subtitleFiles[0])
-      onMsg(`找到字幕: ${subtitleFiles[0]}`)
+      onMsg(`鎵惧埌瀛楀箷: ${subtitleFiles[0]}`)
 
       const buf = await fs.readFile(subPath)
-      const content = buf.toString('utf8').replace(/^﻿/, '')
+      const content = buf.toString('utf8').replace(/^\uFEFF/, '')
 
       const segments: Array<{ start: number; end: number; text: string }> = []
       const blocks = content
-        .replace(/^﻿?WEBVTT[^\n]*(?:\n|$)/, '')
+        .replace(/^锘?WEBVTT[^\n]*(?:\n|$)/, '')
         .replace(/\r/g, '')
         .split(/\n{2,}/)
         .map(b => b.trim())
@@ -837,7 +1080,7 @@ async function downloadAndParseSubtitles(
   })
 }
 
-// ===== 清理 =====
+// ===== 娓呯悊 =====
 
 async function cleanupAnalysisFiles(savePath: string, id: string) {
   const entries = await fs.readdir(savePath).catch(() => [])
@@ -848,7 +1091,7 @@ async function cleanupAnalysisFiles(savePath: string, id: string) {
   }
 }
 
-// ===== IPC 处理器 =====
+// ===== IPC 澶勭悊鍣?=====
 
 export function setupAnalysisHandlers(mainWindow: BrowserWindow) {
   ipcMain.handle('start-analysis', async (_event, request: AnalysisRequest) => {
@@ -911,7 +1154,7 @@ export function setupAnalysisHandlers(mainWindow: BrowserWindow) {
       const content = await fs.readFile(filePath, 'utf8')
       return content
     } catch (e) {
-      throw new Error(`无法读取文件: ${(e as Error).message}`)
+      throw new Error(`鏃犳硶璇诲彇鏂囦欢: ${(e as Error).message}`)
     }
   })
 

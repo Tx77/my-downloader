@@ -19,6 +19,12 @@ extraResources:
     to: bin
     filter:
       - '**/*'
+      - '!models/**'      # 模型文件过大(1.9GB), 不打包, 用户手动下载到 userData/whisper-models/
+      - '!backup-cpu/**'  # CPU 备用也不打包
+  - from: resources/ocr
+    to: ocr
+    filter:
+      - '**/*'
 
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
