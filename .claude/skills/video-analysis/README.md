@@ -17,30 +17,53 @@ Capabilities:
 
 ### Phase 2 — LLM Deep Analysis ✅
 
-- `src/main/modules/content-analyzer.ts` — prompts, provider calls, article generation
+- `src/main/modules/content-analyzer.ts` — prompts, provider calls, article generation, content classification
 - `src/main/modules/analysis-pipeline.ts` — URL pipeline + existing-folder pipeline
+- `src/main/prompts/` — 6 套分析预设 (news/knowledge/opinion/interview/tutorial/generic)
+- `src/main/prompts/common.ts` — 公共规则 + 动态字数函数 (600-8000字)
+- `src/main/prompts/classification.ts` — Stage 0 内容分类 prompt
+- `src/main/prompts/index.ts` — prompt builder (buildChunkNotesPrompt / buildArticlePrompt)
 
 Providers: DeepSeek (default), OpenAI-compatible, Codex CLI
 
 Analysis pipeline:
-1. Chunk transcript (~8000 chars) or direct input (≤24000 chars)
-2. Per-chunk structured note extraction with [FC]/[OP]/[SP]/[RT] inline tagging
-3. Ad/sponsor content filtered at extraction stage
-4. Final article synthesis (max_tokens=8192)
+1. **Stage 0** — Content classification: title+URL+前6000字符 → 判别类型 (置信度 ≥0.65)
+2. **Stage 1** — Per-chunk structured note extraction with preset-specific tag schema
+3. **Stage 2** — Article synthesis with preset-specific outline + dynamic word count
+4. Ad/sponsor content filtered at extraction stage
+5. Cross-chunk context bridging: chunk markers + continuity hints
 
-Article sections: 结论 → 内容概览 → 论证/叙事主线 → 关键事实表格 → 事实观点拆分 → 修辞策略 → 可信度五维评分 → 追问 → 速读版
+Presets:
+- `auto` (default) — auto-classify, fallback to `generic` if confidence < 0.65
+- `news` — [EVENT]/[TIMELINE]/[ACTOR]/[CLAIM]/[UNVERIFIED]
+- `knowledge` — [CONCEPT]/[EXPLANATION]/[EXAMPLE]/[MISCONCEPTION]
+- `opinion` — [THESIS]/[ARG]/[ASSUMPTION]/[COUNTER]/[WEAKNESS]
+- `interview` — [SPEAKER]/[QUESTION]/[ANSWER]/[STORY]/[QUOTE]
+- `tutorial` — [GOAL]/[PREREQ]/[STEP]/[COMMAND]/[PITFALL]/[VERIFY]
+- `generic` — [FC]/[OP]/[SP]/[RT] (original tagging system)
+
+Dynamic word count (based on transcript length):
+- <5000 chars → 800-1500 字
+- 5000-15000 chars → 1500-3500 字
+- >15000 chars → 3000-8000 字
 
 Output files:
 - `analysis.md` — primary reading artifact (deep analysis article)
-- `analysis.prompt.md` — prompt/rules audit trail
-- `analysis.json` — structured cache for UI
-
-Prompt roadmap:
-- Prompt Preset Router proposal: classify content type, select preset, and generate genre-specific notes/articles. See `phase2-llm-analysis.md` section "Proposed: Prompt Preset Router".
+- `analysis.prompt.md` — prompt/rules audit trail (includes preset + classification info)
+- `analysis.json` — structured cache (includes analysisPreset + classification)
 
 Existing folder analysis:
 - Candidates: `transcript.txt` > `transcript.md` > `transcript.llm.md` > README `## 转录文本` section
 - Uses `select-analysis-folder` IPC (does NOT modify download path)
+
+### CLI Logs & Progress (Phase 3.6)
+
+- Log interval: ~10% per stage (was 25%)
+- Each log line includes elapsed time
+- Real progress: audio extraction uses `elapsed/duration`, download/transcription use subprocess output
+- Error messages include stderr tail (last 300 chars)
+- Error banner has copy button → one-click copy to clipboard
+- Stage label `下载` (generic) not `下载视频` — messages disambiguate subtitle vs video download
 
 ### GUI Features
 - Analysis process logs stream to left panel CLI
@@ -49,37 +72,28 @@ Existing folder analysis:
 - Markdown rendering for articles
 - Compact completion banner with collapsible file paths
 
-Logging roadmap:
-- Diagnostic Logging & Error Reporting proposal: structured stage/module/code errors, redacted log files, expandable UI error details, and copyable diagnostics. See `plan.md` section "Proposed: Diagnostic Logging & Error Reporting".
 
-## Next: Phase 3.5 — ASR+OCR 交叉验证 📋
+### Phase 3 — OCR 硬字幕提取 ✅
 
-See `plan.md` for full design.
+- `src/main/modules/ocr-extractor.ts`
+- `resources/ocr/ocr_worker.py`
+- Engine: RapidOCR (ONNX Runtime + DirectML)
 
-### Phase 3 Current Status (2026-06-26)
+### Phase 3.5 — ASR+OCR 交叉验证 ✅
 
-**Engine**: RapidOCR (ONNX Runtime + DirectML) — replaced PaddleOCR for AMD GPU support.
+`ocr` strategy in pipeline: parallel ASR+OCR → crossValidate → merged output.
 
-**Implementation**:
-- `src/main/modules/ocr-extractor.ts` — ffmpeg frame extraction + pHash dedup + Python subprocess communication
-- `resources/ocr/ocr_worker.py` — RapidOCR stdin/stdout JSON worker (single + batch mode)
-- UI: "OCR 硬字幕" option in strategy dropdown
-- ASR: whisper large-v3 model supported (~3GB, 最准)
+### Known Issues (OCR)
 
-**Known issues** (see plan.md for details):
-1. **Encoding**: `PYTHONIOENCODING=utf-8` is critical — Windows pipes default to GBK
-2. **GPU**: RapidOCR's `use_dml` must be monkey-patched to `True`
-3. **Noise**: `cropBottom: true` + text filters needed to exclude non-subtitle text
-4. **numpy**: Requires `numpy<2` for onnxruntime-directml compatibility
-5. **Speed**: Per-frame OCR is inherently slower than single-run ASR
+1. Encoding: `PYTHONIOENCODING=utf-8` critical
+2. GPU: monkey-patch RapidOCR `is_dml_available()`
+3. Noise: cropBottom + text filters needed
+4. numpy<2 required
+5. Models: only medium/large-v3
 
-### Phase 3.5 Design (next step)
-**ASR 为主, OCR 为辅**: 并行跑 ASR+OCR, 用语义比对去 OCR 噪音。
-- 匹配 → 双源确认
-- OCR 独有 → 丢弃
-- ASR 独有 → 保留
-- 修改范围: `analysis-pipeline.ts` (新增 `crossValidate()` 调用)
-- 详见 plan.md Phase 3.5 节
+## Next: Phase 4 📋
+
+whisper-server, batch, RAG, export formats
 
 ## Reference Files
 

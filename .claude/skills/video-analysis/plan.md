@@ -50,7 +50,7 @@
 
 ---
 
-## Phase 3: OCR 硬字幕提取 🔧
+## Phase 3: OCR 硬字幕提取 ✅
 
 ### 实现状态 (2026-06-26)
 
@@ -175,7 +175,7 @@ function crossValidate(
 
 ---
 
-## Phase 3.6: CLI 日志与进度优化 ✅ (进行中)
+## Phase 3.6: CLI 日志与进度优化 ✅
 
 ### 问题
 
