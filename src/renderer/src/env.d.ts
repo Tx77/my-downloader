@@ -20,6 +20,7 @@ interface SubtitleSegment {
 
 type LLMProvider = 'deepseek' | 'openai' | 'codex-cli'
 type ContentAnalysisType = 'summary' | 'key-points' | 'mind-map'
+type AnalysisPreset = 'auto' | 'news' | 'knowledge' | 'opinion' | 'interview' | 'tutorial' | 'generic'
 
 interface SummaryResult {
   text: string
@@ -68,6 +69,14 @@ interface AnalysisResultPayload {
   mindMap?: MindMapNode
   llmProvider?: LLMProvider
   llmModel?: string
+  analysisPreset?: AnalysisPreset
+  classification?: {
+    type: string
+    confidence: number
+    reason: string
+    secondaryTypes?: string[]
+    recommendedPreset: string
+  }
   error?: string
 }
 
@@ -131,13 +140,14 @@ declare global {
         savePath: string
         sessData?: string
         strategy?: 'subtitle-first' | 'asr-only' | 'ocr'
-        model?: 'tiny' | 'base' | 'small' | 'medium' | 'large-v3'
+        model?: 'medium' | 'large-v3'
         language?: string
         llmProvider?: LLMProvider
         llmModel?: string
         llmApiKey?: string
         llmApiBase?: string
         analysisTypes?: ContentAnalysisType[]
+        analysisPreset?: AnalysisPreset
       }) => Promise<AnalysisResultPayload>
 
       listExistingTranscripts: (folderPath: string) => Promise<ExistingTranscriptCandidate[]>
@@ -151,6 +161,7 @@ declare global {
         llmApiBase?: string
         analysisTypes?: ContentAnalysisType[]
         language?: string
+        analysisPreset?: AnalysisPreset
       }) => Promise<AnalysisResultPayload>
 
       cancelAnalysis: (id: string) => Promise<boolean>

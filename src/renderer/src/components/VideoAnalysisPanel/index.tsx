@@ -33,11 +33,14 @@ interface AnalysisResult {
   mindMap?: MindMapNode
   llmProvider?: LLMProvider
   llmModel?: string
+  analysisPreset?: AnalysisPreset
+  classification?: { type: string; confidence: number; reason: string; secondaryTypes?: string[]; recommendedPreset: string }
   error?: string
 }
 
 type LLMProvider = 'deepseek' | 'openai' | 'codex-cli'
 type ContentAnalysisType = 'summary' | 'key-points' | 'mind-map'
+type AnalysisPreset = 'auto' | 'news' | 'knowledge' | 'opinion' | 'interview' | 'tutorial' | 'generic'
 
 interface ExistingTranscriptCandidate {
   path: string
@@ -60,7 +63,7 @@ const STAGES = ['fetching-info', 'downloading', 'extracting-audio', 'transcribin
 const STAGE_LABELS: Record<string, string> = {
   'checking-deps': '检查依赖',
   'fetching-info': '获取信息',
-  'downloading': '下载视频',
+  'downloading': '下载',
   'extracting-audio': '提取音频',
   'transcribing': '语音识别',
   'cross-validating': 'ASR+OCR 校验',
@@ -74,14 +77,15 @@ export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.El
   const log = (msg: string) => { onLog?.(msg) }
   const [url, setUrl] = useState('')
   const [strategy, setStrategy] = useState<'asr-only' | 'ocr'>('asr-only')
-  const [model, setModel] = useState<'tiny' | 'base' | 'small' | 'medium' | 'large-v3'>('medium')
-  const [language, setLanguage] = useState('zh')
+  const [model, setModel] = useState<'medium' | 'large-v3'>('medium')
+  const [language, setLanguage] = useState('auto')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [llmProvider, setLlmProvider] = useState<LLMProvider>('deepseek')
   const [llmModel, setLlmModel] = useState('deepseek-chat')
   const [llmApiKey, setLlmApiKey] = useState('')
   const [saveApiKey, setSaveApiKey] = useState(false)
   const [analysisTypes, setAnalysisTypes] = useState<ContentAnalysisType[]>(['summary', 'key-points', 'mind-map'])
+  const [analysisPreset, setAnalysisPreset] = useState<AnalysisPreset>('auto')
   const [existingFolderPath, setExistingFolderPath] = useState('')
   const [existingCandidates, setExistingCandidates] = useState<ExistingTranscriptCandidate[]>([])
   const [selectedTranscriptPath, setSelectedTranscriptPath] = useState('')
@@ -115,15 +119,23 @@ export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.El
 
   useEffect(() => {
     let lastStage = ''
+    let lastLogPct = -1
     window.electron.onAnalysisProgress((data: AnalysisProgress) => {
       if (data.id === currentIdRef.current) {
         setProgress(data)
-        // Emit log on stage change or at meaningful percent milestones
+        const elapsed = formatElapsed(data.elapsed)
+        // Stage change — always log with full detail
         if (data.stage !== lastStage) {
           lastStage = data.stage
-          log(`[${STAGE_LABELS[data.stage] || data.stage}] ${data.message}`)
-        } else if (data.percent % 25 === 0 && data.percent > 0) {
-          log(`  ${STAGE_LABELS[data.stage] || data.stage} ${data.percent}%`)
+          lastLogPct = -1
+          log(`[${STAGE_LABELS[data.stage] || data.stage}] ${data.message} (${elapsed})`)
+        } else {
+          // Within same stage — log at ~10% intervals or on meaningful messages
+          const nextMilestone = Math.floor(data.percent / 10) * 10
+          if (nextMilestone > lastLogPct) {
+            lastLogPct = nextMilestone
+            log(`  ${data.percent}% · ${data.message} (${elapsed})`)
+          }
         }
       }
     })
@@ -212,7 +224,8 @@ export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.El
         llmProvider,
         llmModel,
         llmApiKey: llmApiKey.trim() || undefined,
-        analysisTypes
+        analysisTypes,
+        analysisPreset
       })
       if (res?.error) { setError(res.error); setAnalyzing(false) }
       else if (res?.transcript) { setResult(res); setAnalyzing(false) }
@@ -261,7 +274,8 @@ export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.El
         llmModel,
         llmApiKey: llmApiKey.trim() || undefined,
         analysisTypes,
-        language
+        language,
+        analysisPreset
       })
       if (res?.error) { setError(res.error); setAnalyzing(false) }
       else if (res?.transcript) { setResult(res); setAnalyzing(false) }
@@ -465,8 +479,9 @@ export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.El
         <div className="control-group">
           <label>语言</label>
           <select value={language} onChange={(e) => setLanguage(e.target.value)} disabled={analyzing}>
+            <option value="auto">自动</option>
             <option value="zh">中文</option><option value="en">English</option>
-            <option value="ja">日本語</option><option value="auto">自动</option>
+            <option value="ja">日本語</option>
           </select>
         </div>
         {analyzing ? (
@@ -568,6 +583,18 @@ export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.El
                 保存 API key
               </label>
             )}
+            <div className="control-group" style={{ marginTop: 8 }}>
+              <label>分析类型</label>
+              <select value={analysisPreset} onChange={(e) => setAnalysisPreset(e.target.value as AnalysisPreset)} disabled={analyzing}>
+                <option value="auto">自动识别</option>
+                <option value="news">新闻 / 事件</option>
+                <option value="knowledge">知识 / 课程</option>
+                <option value="opinion">评论 / 观点</option>
+                <option value="interview">访谈 / 播客</option>
+                <option value="tutorial">教程 / How-to</option>
+                <option value="generic">通用</option>
+              </select>
+            </div>
             <div className="analysis-type-options">
               <label><input type="checkbox" checked={analysisTypes.includes('summary')} onChange={() => toggleAnalysisType('summary')} disabled={analyzing} /> 摘要</label>
               <label><input type="checkbox" checked={analysisTypes.includes('key-points')} onChange={() => toggleAnalysisType('key-points')} disabled={analyzing} /> 要点</label>
@@ -623,7 +650,19 @@ export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.El
       {error && (
         <div className="error-banner">
           <AlertCircle size={16} style={{ flexShrink: 0, marginTop: 1 }} />
-          <span>{error}</span>
+          <span className="error-text">{error}</span>
+          <button
+            className="copy-error-btn"
+            onClick={() => {
+              navigator.clipboard.writeText(error).then(() => {
+                setCopied(true)
+                setTimeout(() => setCopied(false), 2000)
+              }).catch(() => {})
+            }}
+            title="复制错误信息"
+          >
+            {copied ? <CheckCircle2 size={13} color="#1db954" /> : <Copy size={13} />}
+          </button>
         </div>
       )}
 
@@ -636,6 +675,11 @@ export function VideoAnalysisPanel({ savePath, sessData, onLog }: Props): JSX.El
             <span className="completion-meta">
               · {result.transcript.segments.length} 段
               · {result.subtitleSource === 'external' ? '外挂字幕' : result.subtitleSource === 'ocr' ? 'ASR+OCR 校验' : 'GPU 语音识别'}
+              {result.analysisPreset && result.analysisPreset !== 'auto' && (
+                <> · 分析类型: {result.analysisPreset === 'news' ? '新闻/事件' : result.analysisPreset === 'knowledge' ? '知识/课程' : result.analysisPreset === 'opinion' ? '评论/观点' : result.analysisPreset === 'interview' ? '访谈/播客' : result.analysisPreset === 'tutorial' ? '教程/How-to' : '通用'}
+                  {result.classification ? ` (${Math.round(result.classification.confidence * 100)}%)` : ' (用户选择)'}
+                </>
+              )}
               {result.llmProvider && <> · {result.llmProvider} / {result.llmModel}</>}
             </span>
           </div>

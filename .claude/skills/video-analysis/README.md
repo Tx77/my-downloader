@@ -49,6 +49,9 @@ Existing folder analysis:
 - Markdown rendering for articles
 - Compact completion banner with collapsible file paths
 
+Logging roadmap:
+- Diagnostic Logging & Error Reporting proposal: structured stage/module/code errors, redacted log files, expandable UI error details, and copyable diagnostics. See `plan.md` section "Proposed: Diagnostic Logging & Error Reporting".
+
 ## Next: Phase 3.5 — ASR+OCR 交叉验证 📋
 
 See `plan.md` for full design.

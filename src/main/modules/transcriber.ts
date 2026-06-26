@@ -13,7 +13,7 @@ import iconv from 'iconv-lite'
 // ===== 类型 =====
 
 export interface TranscriberOptions {
-  model?: 'tiny' | 'base' | 'small' | 'medium' | 'large-v3'
+  model?: 'medium' | 'large-v3'
   language?: string
   onProgress?: (percent: number, message: string) => void
   /** 收集子进程的 Set，用于外部取消 */
@@ -45,7 +45,7 @@ export async function transcribe(
   audioPath: string,
   options: TranscriberOptions = {}
 ): Promise<TranscriberResult> {
-  const { model = 'medium', language = 'zh', onProgress, processSet } = options
+  const { model = 'medium', language = 'auto', onProgress, processSet } = options
 
   const whisperPath = getBinaryPath('whisper-cli')
   const modelPath = getModelPath(model)
@@ -62,7 +62,7 @@ export async function transcribe(
       `模型文件不存在:\n  ${modelPath}\n\n` +
       `请从 https://huggingface.co/ggerganov/whisper.cpp 下载 ggml-${model}.bin\n` +
       `放到: ${modelDir}\n\n` +
-      `推荐模型: ggml-medium.bin (1.5GB, 精度高) 或 ggml-small.bin (466MB, 速度快)`
+      `可用模型: ggml-medium.bin (1.5GB) 或 ggml-large-v3.bin (2.9GB)`
     )
   }
 

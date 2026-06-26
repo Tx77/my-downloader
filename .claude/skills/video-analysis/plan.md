@@ -1,7 +1,7 @@
-# 视频内容分析工具 — 技术方案
+﻿# 视频内容分析工具 — 技术方案
 
 > **更新**: 2026-06-26
-> **当前阶段**: Phase 1 ✅ | Phase 2 ✅ | Phase 3 🔧
+> **当前阶段**: Phase 1 ✅ | Phase 2 ✅ | Phase 2.5 ✅ | Phase 3 ✅ | Phase 3.5 📋
 
 ## 实现状态
 
@@ -9,7 +9,9 @@
 |-------|------|------|
 | Phase 1 | 音频提取 + ASR 转录 + GPU 加速 + 分析面板 | ✅ 完成 |
 | Phase 2 | LLM 深度内容分析 (文章/可信度评分/广告过滤) | ✅ 完成 |
-| Phase 3 | OCR 硬字幕提取 | 🔧 开发中 (RapidOCR + DirectML GPU) |
+| Phase 2.5 | Prompt Preset Router (内容分类 + 6 套预设 + 动态字数) | ✅ 完成 |
+| Phase 3 | OCR 硬字幕提取 (RapidOCR + DirectML GPU) | ✅ 完成 |
+| Phase 3.5 | ASR + OCR 交叉验证 | 📋 设计中 |
 | Phase 4 | whisper-server 常驻 / 批量 / 问答增强 | 📋 待实现 |
 
 ---
@@ -75,6 +77,15 @@
 3. **OCR 识别画面所有文字**: 不只字幕 → 已启用 `cropBottom: true` + 后置文本过滤器
 4. **numpy 2.x 兼容**: `onnxruntime-directml` 需要 numpy<2 → 已降级
 5. **速度慢**: DirectML 首帧 shader 编译 ~10-15s，后续帧秒级。ASR（whisper GPU）是一次性推理所以快，OCR 是 N 帧逐帧推理，本质不同
+
+### 打包检查清单
+
+每次打包前必须确认：
+
+1. **升级版本号**: `package.json` 的 `version` 字段，按语义化版本 (本次: 1.1.0 → 1.2.0)
+2. **更新 yt-dlp**: `./resources/bin/yt-dlp.exe -U`（YouTube 接口频繁变动，最好打包当天更新）
+3. **模型部署路径**: `getModelDir()` 使用 `app.getPath('userData')`，此路径 = `%APPDATA%/{package.json name}/`。当前 name=`my-downloader`，所以模型必须放在 `%APPDATA%/my-downloader/whisper-models/`，**不是** `Downloader Pro/`
+4. **model 类型一致性**: 改 model 列表时需同步更新 transcriber.ts、analysis-pipeline.ts、env.d.ts、preload/index.d.ts、VideoAnalysisPanel 五处
 
 ### 依赖
 - Python 3.8+
@@ -164,10 +175,44 @@ function crossValidate(
 
 ---
 
+## Phase 3.6: CLI 日志与进度优化 ✅ (进行中)
+
+### 问题
+
+1. CLI 日志太稀疏 — 只在阶段切换和 25% 间隔记录，大量进度信息被丢弃
+2. 进度条是假的 — 音频提取写死 50%，LLM 分析用回调计数冒充百分比
+3. 报错信息不详细 — 子进程失败只显示退出码，不显示 stderr
+
+### 目标
+
+- CLI 日志每 ~10% 记录一次，每条带耗时
+- 有真实进度源的用真实进度（下载百分比、转录百分比、音频提取 elapsed/duration），没有的用子任务计数
+- 子进程错误消息包含 stderr tail（最后 300 字符）
+- 不引入新的 logger 模块、log 文件、DiagnosticError 类型——在现有框架内修
+
+### 已做改动
+
+**UI 端** (`VideoAnalysisPanel/index.tsx`):
+- 25% 间隔 → 10% 间隔
+- 每条日志带耗时 `(Xs)`
+- 阶段切换全部记录，不丢消息
+
+**Pipeline 端** (`analysis-pipeline.ts`):
+- 音频提取: 写死 50% → `elapsed/duration` 实时百分比
+- LLM 分析: 回调计数 → 按完成子任务数 / 总子任务数
+- 视频信息: 只显标题 → 标题 + 时长(min) + 是否有字幕
+- 下载错误: `退出码: 1` → `退出码: 1, {stderr tail}`
+
+### 待做
+
+- [ ] `decodeOutput` + `iconv-lite` 的 cp936 在部分 Windows 环境下仍可能出乱码，考虑 `chardet` 自动检测
+- [ ] 已有文件夹分析路径的进度消息改进
+
+---
 ## Phase 4: 优化 📋
 
-- Prompt Preset Router: auto-classify transcript genre and route to genre-specific prompts/outlines. See `phase2-llm-analysis.md` section "Proposed: Prompt Preset Router".
 - whisper-server 常驻模式 (见 `whisper-optimization.md`)
 - 批量分析
 - 跨视频问答/RAG
 - 导出格式 (PDF/HTML)
+

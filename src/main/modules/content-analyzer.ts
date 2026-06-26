@@ -1,9 +1,34 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { readFile } from 'fs/promises'
 import { join } from 'path'
+import {
+  getPreset,
+  buildChunkNotesPrompt,
+  buildArticlePrompt,
+  buildClassificationPrompt,
+  formatWordCountGuidance
+} from '../prompts'
 
 export type LLMProvider = 'deepseek' | 'openai' | 'codex-cli'
 export type AnalysisType = 'summary' | 'key-points' | 'mind-map'
+export type AnalysisPreset = 'auto' | 'news' | 'knowledge' | 'opinion' | 'interview' | 'tutorial' | 'generic'
+
+export interface ContentClassification {
+  type: AnalysisPreset
+  confidence: number
+  reason: string
+  secondaryTypes?: AnalysisPreset[]
+  recommendedPreset: Exclude<AnalysisPreset, 'auto'>
+}
+
+export interface PromptPresetDefinition {
+  id: Exclude<AnalysisPreset, 'auto'>
+  label: string
+  description: string
+  notesSchema: string
+  articleOutline: string
+  qualityRules: string
+}
 
 export interface TranscriptSegment {
   start: number
@@ -47,6 +72,8 @@ export interface AnalysisResults {
 export interface ArticleAnalysisResult {
   markdown: string
   prompt: string
+  preset: Exclude<AnalysisPreset, 'auto'>
+  classification?: ContentClassification
 }
 
 export interface QAResponse {
@@ -320,147 +347,61 @@ export async function generateAnalysisArticle(
   title: string,
   text: string,
   segments: TranscriptSegment[],
-  options: AnalyzerOptions = {}
+  options: AnalyzerOptions = {},
+  analysisPreset: AnalysisPreset = 'auto'
 ): Promise<ArticleAnalysisResult> {
-  options.onProgress?.('Writing readable analysis article...')
+  options.onProgress?.('Determining analysis strategy...')
 
   const transcriptWithTime = segments.length
     ? segments.map((s) => `[${formatTime(s.start)}] ${s.text}`).join('\n')
     : text
 
-  // 如果总长度不大，直接使用全文；否则切块处理
+  // ── Resolve preset ──
+  let classification: ContentClassification | undefined
+  let resolvedId: Exclude<AnalysisPreset, 'auto'>
+
+  if (analysisPreset === 'auto') {
+    options.onProgress?.('Classifying content type...')
+    classification = await classifyContentType(title, title || 'video', text, options)
+    resolvedId = classification.confidence >= 0.65 ? classification.recommendedPreset : 'generic'
+  } else {
+    resolvedId = analysisPreset as Exclude<AnalysisPreset, 'auto'>
+  }
+
+  const preset = getPreset(resolvedId)
+  const wordCountGuidance = formatWordCountGuidance(
+    transcriptWithTime.length,
+    segments.length || Math.floor(text.length / 200)
+  )
+
+  // ── Chunking ──
   const TRANSCRIPT_DIRECT_THRESHOLD = 24000
   const useDirectTranscript = transcriptWithTime.length <= TRANSCRIPT_DIRECT_THRESHOLD
   const chunks = useDirectTranscript ? [transcriptWithTime] : chunkText(transcriptWithTime, MAX_CHARS_PER_REQUEST)
 
-  // ── Note extraction (per chunk) ──
-  const noteSystemPrompt = [
-    '你是一位资深深度阅读分析师。你的任务是从原始文本中为一篇深度分析文章提取结构化素材。',
-    '输入可能是中文、英文、日文或任何语言；你的分析和笔记输出必须使用中文。',
-    '',
-    '核心原则：',
-    '- 只基于原文，不编造任何外部信息。原文中没有的内容坚决不写。',
-    '- 区分以下三类内容：①可验证的事实陈述 ②作者的观点/判断/解读 ③广告/带货/赞助推广',
-    '- 凡属于第③类（广告），直接忽略，不提取任何素材。',
-    '',
-    '素材提取规则：',
-    '- 保留具体数字、机构名、人名、地名、年份、金额、比率——这些是文章的说服力来源。引用原文中的数值时保留原始语言和单位。',
-    '- 对每个主张标注可信度标记：',
-    '  [FC] 可验证的事实陈述（Factual Claim）',
-    '  [OP] 作者的纯观点/判断（Opinion）',
-    '  [SP] 推测/预测（Speculation）',
-    '  [RT] 修辞手法/情绪表达（Rhetorical Technique）',
-    '- 如果作者引用了第三方数据但没有给出来源，标注为”[FC-未给来源]”。',
-    '- 如果有因果链条，用”→”写清：背景 → 机制 → 后果 → 作者结论。',
-    '- 保留值得引用的原文片段（50词/字以内），标记其修辞功能。引用时保留原始语言，但在括号中附中文翻译。',
-    '- 识别文本的语气和表达策略（科普/讽刺/煽情/数据轰炸/诉诸权威/类比/偷换概念等）。',
-    '- 分析笔记全部用中文输出。'
-  ].join('\n')
-
-  const noteUserPrompt = [
-    '请从以下文本中提取**详细**的结构化分析笔记。后续需要用这些素材写一篇深度分析文章——保留越丰富的细节越好。',
-    '',
-    '注意：如果文本末尾或中间出现带货/赞助/推广内容（如”点击链接购买””评论区下单””我的课程””合作推广”等），请完全忽略，不要提取。',
-    '',
-    '请按以下结构输出：',
-    '',
-    '### 本段核心内容（3-5 句完整段落）',
-    '概括这段在说什么，并标注主要属于[FC]事实陈述还是[OP]观点论证。',
-    '',
-    '### 关键事实、数字与案例',
-    '| 标记 | 具体内容 | 在论证中的作用 | 可信度评估 |',
-    '| --- | --- | --- | --- |',
-    '每行标记 [FC]/[OP]/[SP]/[RT]，并评估可信度：高/中/低/无法判断。',
-    '',
-    '### 论证/叙事结构',
-    '用箭头描述：原文先说什么 → 然后引出什么 → 用什么支撑 → 推向什么结论。如果是叙事型内容（讲故事而非论证），描述叙事弧线。',
-    '',
-    '### 措辞与修辞分析',
-    '摘录 3-5 处有代表性的表述，分析其修辞功能（如”用类比让复杂问题简单化””用夸张数字制造震撼感””用社区黑话拉近与读者距离”）。',
-    '',
-    '### 事实 vs 观点拆分',
-    '| 原文说法（短摘）| 归类 | 判断依据 |',
-    '| --- | --- | --- |',
-    '归类选项：可验证事实 / 作者个人判断 / 未经证实的声称 / 情绪宣泄 / 广告推广',
-    '',
-    '文本：'
-  ].join('\n')
+  // ── Stage 1: Note extraction (per chunk) ──
+  const { system: noteSystemPrompt, user: noteUserPrompt } = buildChunkNotesPrompt(preset)
 
   const notes: string[] = []
   for (let i = 0; i < chunks.length; i++) {
     options.onProgress?.(`Writing article notes ${i + 1}/${chunks.length}...`)
-    notes.push(await callLLM(noteSystemPrompt, `${noteUserPrompt}\n\n${chunks[i]}`, options))
+    const chunkMarker = chunks.length > 1
+      ? `\n\n[Chunk ${i + 1}/${chunks.length}: 原文第 ${transcriptWithTime.indexOf(chunks[i]) + 1}–${transcriptWithTime.indexOf(chunks[i]) + chunks[i].length} 字符, 全文共 ${transcriptWithTime.length} 字符]\n`
+      : ''
+    notes.push(await callLLM(noteSystemPrompt, `${noteUserPrompt}${chunkMarker}\n\n${chunks[i]}`, options))
   }
 
-  // ── Final article generation ──
+  // ── Stage 2: Article synthesis ──
   const ARTICLE_MAX_TOKENS = 16384
+  const notesText = notes.join('\n\n---\n\n')
 
-  const finalSystemPrompt = [
-    '你是一位资深编辑和深度内容分析师。',
-    '你的任务是基于分析笔记写一篇**深度分析文章**（不是短摘要，不是 JSON）。',
-    '输入笔记可能是从任何语言的原文中提取的；你的文章输出必须使用中文。',
-    '',
-    '写作要求：',
-    '- 不要暴露技术细节（不提 chunk/notes/LLM/prompt/模型）。',
-    '- 严格基于提供的笔记素材写作，不编造外部信息。',
-    '- 对笔记中标记了 [FC-未给来源] 的内容，必须写明”原文引用了此数据但未给出可核查来源”。',
-    '- 对笔记中标记了 [OP] 的内容，用”作者认为/作者声称/作者判断”来表述。',
-    '- 正文建议 1800–2500 中文字（素材支持的话），每个章节都要有实质内容。',
-    '- 引用原文的具体数字、人名、案例来支撑分析。引用非中文原文时给出中文翻译，必要时保留原文措辞。',
-    '- 分析”论证链条”而非”时间线”：前提 → 证据 → 推理 → 结论 → 隐含意义。',
-    '- 如果是叙事型内容（讲故事而非论证），分析其叙事策略而非强行套论证框架。',
-    '- 使用清晰的中文 Markdown。'
-  ].join('\n')
-
-  const finalUserPrompt = [
-    `标题：${title}`,
-    '',
-    '请写一篇深度内容分析文章。原文可能是中文、英文或其他语言——素材笔记中引用的原文片段可能混有多种语言。你的文章输出必须全部用中文。',
-    '严格按以下结构（每个章节都必须有充分内容，不要只写一两行）：',
-    '',
-    '# {标题}｜深度分析',
-    '',
-    '## 一句话结论',
-    '3-5 句话概括原文的核心判断。如果是论证型内容，写出中心论点；如果是叙事型，写出它通过什么故事让读者产生什么感受/认知。',
-    '',
-    '## 内容概览',
-    '展开写（不少于 200 字）：主题、背景、涉及的主要对象、核心冲突或问题。读者看完这节应该能判断这篇文章与自己是否相关。',
-    '',
-    '## 论证/叙事主线',
-    '这是文章最核心的章节。如果是论证型：按”前提 → 证据 → 推理 → 结论 → 隐含主张”展开，每步引用原文的具体说法。如果是叙事型：分析叙事弧线（铺垫→冲突→高潮→收尾），解释作者在每个阶段如何引导读者情绪。',
-    '',
-    '## 关键事实、数字与案例',
-    '| 标记 | 内容 | 在论证/叙事中的作用 | 可信度 |',
-    '| --- | --- | --- | --- |',
-    '每行引用一个具体的事实/数字/案例，标注可信度标记 [FC]/[FC-未给来源]/[SP] 等，并说明它服务于什么目的（建立可信度/煽动情绪/制造对比/等）。',
-    '',
-    '## 事实与观点拆分',
-    '| 原文说法 | 归类 | 分析 |',
-    '| --- | --- | --- |',
-    '对 8-15 个有代表性的原文说法做归类：可验证事实 / 作者判断 / 未经证实的声称 / 隐喻或修辞。分析栏写你如此归类的理由。',
-    '',
-    '## 作者的立场、情绪与表达策略',
-    '分析作者如何影响读者：语气（科普/愤慨/讽刺/戏谑/中立）、修辞手法（数据轰炸/情感叙事/权威引述/类比/偷换概念/诉诸恐惧/制造焦虑等）、与目标读者的关系构建（社区黑话/内梗/人称使用等）。注意不要将作者的立场包装成客观事实。',
-    '',
-    '## 可信度与论证质量评估',
-    '从以下维度给出 1-5 星评价并各写一句理由：',
-    '- 事实准确性',
-    '- 论证逻辑性',
-    '- 信息来源透明度',
-    '- 立场平衡度',
-    '- 修辞克制程度',
-    '总结：这篇内容的整体可信度如何？读者应该带着怎样的警觉度来阅读？',
-    '',
-    '## 可以追问的问题',
-    '4-8 个值得进一步核实或思考的问题。每个问题说明追问理由。',
-    '',
-    '## 速读版',
-    '6-12 条 bullet，每条一句话，覆盖全文关键信息。',
-    '',
-    '以下是从原文提取的分析笔记，请基于这些素材写作。笔记中已用 [FC]/[OP]/[SP]/[RT] 标记了内容类型，已在笔记层面排除了广告/推广内容：',
-    '',
-    notes.join('\n\n---\n\n')
-  ].join('\n')
+  const { system: finalSystemPrompt, user: finalUserPrompt } = buildArticlePrompt(
+    preset,
+    title,
+    notesText,
+    wordCountGuidance,
+    classification
+  )
 
   const markdown = await callLLM(finalSystemPrompt, finalUserPrompt, options, ARTICLE_MAX_TOKENS)
 
@@ -469,22 +410,43 @@ export async function generateAnalysisArticle(
     ? `原始文本共 ${transcriptWithTime.length} 字符，未超过 ${TRANSCRIPT_DIRECT_THRESHOLD} 字符阈值，直接作为单块输入（未切块）。`
     : `原始文本按最多 ${MAX_CHARS_PER_REQUEST} 字符切块，共 ${chunks.length} 块。`
 
+  const presetLabel = preset.label
+  const presetInfo = analysisPreset === 'auto'
+    ? [
+        `- 预设请求：auto`,
+        `- 实际使用：${resolvedId} (${presetLabel})`,
+        `- 分类置信度：${classification ? Math.round(classification.confidence * 100) + '%' : 'N/A'}`,
+        `- 分类理由：${classification?.reason || 'N/A'}`,
+        ...(classification?.secondaryTypes?.length ? [`- 次要类型：${classification.secondaryTypes.join(', ')}`] : [])
+      ]
+    : [`- 预设请求：${analysisPreset}（用户手动选择）`, `- 实际使用：${resolvedId} (${presetLabel})`]
+
   const prompt = [
     '# LLM 分析 Prompt 与规则',
+    '',
+    '## 分析预设',
+    ...presetInfo,
+    '',
+    '## 字数控制',
+    `- ${wordCountGuidance}`,
     '',
     '## 输入组织方式',
     '',
     transcriptInputDesc,
-    '- 阶段 1：每个切块先让 LLM 做”结构化素材提取”（含 [FC]/[OP]/[SP]/[RT] 可信度标记 + 事实观点拆分 + 修辞分析 + 广告过滤）。',
-    '- 阶段 2：合并所有笔记，让 LLM 写成深度分析文章（含可信度评分）。',
+    '- 阶段 1：每个切块先让 LLM 做结构化素材提取（按预设标记体系标注内容类型 + 事实观点拆分 + 修辞分析 + 广告过滤）。',
+    '- 阶段 2：合并所有笔记，让 LLM 写成深度分析文章（含按预设大纲组织的章节）。',
     '- 若转录带时间戳，输入格式为 `[mm:ss] 文本`；已有纯文本分析会按段落生成粗略时间戳。',
     '- 文章生成阶段 max_tokens 设为 16384（比通用调用的 8192 更大，确保长文不被截断）。',
     '',
     '## 广告/赞助过滤规则',
     '',
-    '- 在笔记提取阶段即识别并排除：带货文案、商品推广、课程推销、”评论区链接”、赞助口播、合作推广等。',
-    '- 识别标志：语气突变（从内容分析转为推销）、链接/二维码提及、价格信息、”限时优惠”等促销语言。',
+    '- 在笔记提取阶段即识别并排除：带货文案、商品推广、课程推销、评论区链接、赞助口播、合作推广等。',
+    '- 识别标志：语气突变（从内容分析转为推销）、链接/二维码提及、价格信息、限时优惠等促销语言。',
     '- 过滤后的广告内容不进入最终文章。',
+    '',
+    '## 跨块连续性',
+    '- 转录文本较长时按最多 8000 字符切块，每个 chunk 含位置标记 [Chunk N/M: ...]。',
+    '- 文章合成时提示注意跨块连续性：论证主线、人物故事、因果链条可能跨越多块。',
     '',
     '## 笔记提取 System Prompt',
     '',
@@ -495,7 +457,7 @@ export async function generateAnalysisArticle(
     '## 笔记提取 User Prompt 模板',
     '',
     '```text',
-    noteUserPrompt,
+    noteUserPrompt.replace(noteUserPrompt.indexOf('文本：') >= 0 ? noteUserPrompt.slice(noteUserPrompt.indexOf('文本：')) : '', '[这里填入每个切块的原文 + Chunk 标记]'),
     '```',
     '',
     '## 最终文章 System Prompt',
@@ -507,11 +469,43 @@ export async function generateAnalysisArticle(
     '## 最终文章 User Prompt 模板',
     '',
     '```text',
-    finalUserPrompt.replace(notes.join('\n\n---\n\n'), '[这里填入每个切块生成的分析笔记]'),
+    finalUserPrompt.replace(notesText, '[这里填入每个切块生成的分析笔记]'),
     '```'
   ].join('\n')
 
-  return { markdown: markdown.trim(), prompt }
+  return { markdown: markdown.trim(), prompt, preset: resolvedId, classification }
+}
+
+// ── Stage 0: Content Classification ──
+
+const FALLBACK_CLASSIFICATION: ContentClassification = {
+  type: 'generic',
+  confidence: 0,
+  reason: 'Classification failed or returned invalid JSON',
+  recommendedPreset: 'generic'
+}
+
+export async function classifyContentType(
+  title: string,
+  url: string,
+  transcriptText: string,
+  options: AnalyzerOptions = {}
+): Promise<ContentClassification> {
+  const excerpt = transcriptText.slice(0, 6000)
+  const { system, user } = buildClassificationPrompt(title, url, excerpt)
+
+  try {
+    const response = await callLLM(system, user, options, 512)
+    const parsed = extractJson<ContentClassification>(response, FALLBACK_CLASSIFICATION)
+    if (!parsed || !parsed.type) return FALLBACK_CLASSIFICATION
+    // Ensure recommendedPreset is set
+    if (!parsed.recommendedPreset) {
+      parsed.recommendedPreset = parsed.type === 'auto' ? 'generic' : parsed.type as Exclude<AnalysisPreset, 'auto'>
+    }
+    return parsed
+  } catch {
+    return FALLBACK_CLASSIFICATION
+  }
 }
 
 export async function askQuestion(

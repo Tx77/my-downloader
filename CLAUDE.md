@@ -21,8 +21,13 @@ src/
 │       ├── audio-extractor.ts     # ffmpeg 音频提取 (16kHz WAV)
 │       ├── transcriber.ts         # whisper.cpp ASR (Vulkan GPU)
 │       ├── ocr-extractor.ts       # [NEW] OCR 硬字幕提取 (RapidOCR + DirectML)
-│       ├── content-analyzer.ts    # LLM 分析 (Prompt/Provider/文章生成)
+│       ├── content-analyzer.ts    # LLM 分析 (Prompt/Preset路由/文章生成)
 │       └── analysis-pipeline.ts   # 分析流水线编排 (URL+已有文本+OCR)
+├── prompts/                       # [NEW] Prompt 预设定义
+│   ├── common.ts                  #   公共规则 + 动态字数函数
+│   ├── classification.ts          #   Stage 0 内容分类 prompt
+│   ├── index.ts                   #   聚合 + buildChunkNotesPrompt/buildArticlePrompt
+│   └── presets/                   #   6 套预设 (news/knowledge/opinion/interview/tutorial/generic)
 ├── preload/
 │   └── index.ts                   # contextBridge API
 └── renderer/
@@ -67,8 +72,16 @@ resources/
 - 文章含: 结论/内容概览/论证主线/事实数字表/事实观点拆分/修辞分析/可信度五维评分/追问/速读
 - 输出: analysis.md (主阅读文件), analysis.prompt.md (Prompt 审计), analysis.json (结构化缓存)
 
-**Phase 3 — OCR 硬字幕提取 🔧 (进行中):**
-- 引擎: RapidOCR v3 (ONNX Runtime + DirectML, 替代原计划的 PaddleOCR)
+**Phase 2.5 — Prompt Preset Router ✅ (新增):**
+- 内容分类 (Stage 0): LLM 用 title+URL+前6000字符分类 (news/knowledge/opinion/interview/tutorial/generic)
+- 6 套预设: 每种内容类型有独立的笔记标记体系和文章大纲
+- 动态字数: 根据转录长度自动调整输出区间 (600-8000字, 3档)
+- 跨块上下文桥接: chunk marker + synthesis 提示确保连续内容不丢失
+- UI: LLM设置面板内"分析类型"下拉框, 默认"自动识别"
+- 代码: `src/main/prompts/` (common.ts + classification.ts + presets/*.ts + index.ts)
+
+**Phase 3 — OCR 硬字幕提取 ✅:**
+- 引擎: RapidOCR v3 (ONNX Runtime + DirectML)
 - 流程: ffmpeg 抽帧(fps=1, cropBottom=底部1/3) → pHash 去重(纯TS实现) → 批量 JSON 协议发 Python worker → 文本过滤 → 时间轴合并
 - GPU: DirectML 供 AMD 7900XTX, 需 monkey-patch RapidOCR 的 `is_dml_available()`
 - 进度: 7 阶段 (抽帧→去重→加载→识别→合并→过滤→完成)
@@ -103,6 +116,10 @@ resources/
 8. **numpy 版本**: `onnxruntime-directml` 要求 `numpy<2`, 升级 numpy 会导致 DLL 加载失败
 9. **RapidOCR GPU**: 内部 `use_dml` 默认 False, 需 monkey-patch `ProviderConfig.is_dml_available()`
 10. **模型下载**: huggingface 需代理, 不能用两个源续传(会导致文件损坏), 用 `hf-mirror.com` 镜像稳定
+11. **Prompt 维护**: 公共规则在 `common.ts` 一处修改, 不要复制粘贴到各 preset。分类 prompt 只让模型诚实分类, 0.65 阈值由代码层处理。
+12. **预设文件**: 新增 preset 需在 `index.ts` 的 `PRESETS` 注册表中添加对应条目。
+13. **模型部署路径**: `getModelDir()` 使用 `app.getPath('userData')`，此路径基于 `package.json` 的 `name` 字段（`my-downloader`）。模型文件必须放在 `%APPDATA%/my-downloader/whisper-models/`，**不是** `Downloader Pro/`！打包时 `electron-builder.yml` 的 `productName` 只是安装包显示名，不影响 `userData` 路径。
+14. **打包前必做**: (1) 升级 `package.json` 版本号 (2) 确保 yt-dlp 是最新版 `./resources/bin/yt-dlp.exe -U`
 
 ## 文档维护规则
 

@@ -124,7 +124,7 @@ Rationale: arbitrary `.md` files may contain old analyses/drafts that pollute LL
 
 ## Proposed: Prompt Preset Router
 
-Status: design proposal. Not implemented yet.
+Status: ✅ Implemented (2026-06-26).
 
 ### Problem
 

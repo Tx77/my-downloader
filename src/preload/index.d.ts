@@ -16,7 +16,7 @@ interface AnalysisRequest {
   savePath: string
   sessData?: string
   strategy?: 'subtitle-first' | 'asr-only'
-  model?: 'tiny' | 'base' | 'small' | 'medium' | 'large-v3'
+  model?: 'medium' | 'large-v3'
   language?: string
 }
 

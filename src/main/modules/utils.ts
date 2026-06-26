@@ -12,7 +12,8 @@ export const getBinaryPath = (binaryName: string) => {
 /** whisper 模型目录 — 打包后放在 userData 下，不随安装包分发 */
 export const getModelDir = (): string => {
   if (app.isPackaged) {
-    // C:\Users\<user>\AppData\Roaming\Downloader Pro\whisper-models\
+    // app.getPath('userData') 基于 package.json 的 name 字段 (my-downloader)
+    // 实际路径: %APPDATA%/my-downloader/whisper-models/
     return join(app.getPath('userData'), 'whisper-models')
   }
   // 开发: resources/bin/models/
